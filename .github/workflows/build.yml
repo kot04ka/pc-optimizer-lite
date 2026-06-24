@@ -38,8 +38,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = $env:GITHUB_REF_NAME
+          $ErrorActionPreference = "Continue"
           gh release view $tag *> $null
-          if ($LASTEXITCODE -ne 0) {
+          $releaseExists = $LASTEXITCODE -eq 0
+          $ErrorActionPreference = "Stop"
+          if (-not $releaseExists) {
             gh release create $tag `
               "dist\PC Optimizer Lite.exe#PC-Optimizer-Lite.exe" `
               "installer_output\PC-Optimizer-Lite-Setup.exe#PC-Optimizer-Lite-Setup.exe" `
