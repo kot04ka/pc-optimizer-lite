@@ -225,13 +225,22 @@ def install_downloaded_update(downloaded_exe: Path, *, current_exe: Path | None 
     staged = current.with_name(current.stem + "_new.exe")
     if downloaded_exe.resolve() != staged.resolve():
         staged.write_bytes(downloaded_exe.read_bytes())
-    script = current.with_name("apply_pc_optimizer_lite_update.bat")
+    script = current.with_name("apply_pc_optimizer_lite_update.ps1")
     script.write_text(_replacement_script(current=current, staged=staged, pid=os.getpid()), encoding="utf-8")
     creation_flags = 0
     if os.name == "nt":
-        creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+        creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
     subprocess.Popen(
-        ["cmd.exe", "/c", str(script)],
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+            str(script),
+        ],
         cwd=str(current.parent),
         creationflags=creation_flags,
         close_fds=True,
@@ -386,22 +395,26 @@ def _sha256_hashes_from_text(text: str) -> dict[str, str]:
 
 
 def _replacement_script(*, current: Path, staged: Path, pid: int) -> str:
+    old = _ps_quote(str(current))
+    new = _ps_quote(str(staged))
+    workdir = _ps_quote(str(current.parent))
     return (
-        "@echo off\n"
-        "setlocal\n"
-        f"set \"OLD={current}\"\n"
-        f"set \"NEW={staged}\"\n"
-        f"set \"PID={pid}\"\n"
-        ":wait\n"
-        "tasklist /FI \"PID eq %PID%\" | find \"%PID%\" >nul\n"
-        "if not errorlevel 1 (\n"
-        "  timeout /t 1 /nobreak >nul\n"
-        "  goto wait\n"
-        ")\n"
-        "move /Y \"%NEW%\" \"%OLD%\" >nul\n"
-        "start \"\" \"%OLD%\"\n"
-        "del \"%~f0\"\n"
+        "$ErrorActionPreference = 'SilentlyContinue'\n"
+        f"$old = {old}\n"
+        f"$new = {new}\n"
+        f"$pidToWait = {pid}\n"
+        "while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {\n"
+        "    Start-Sleep -Seconds 1\n"
+        "}\n"
+        "Move-Item -LiteralPath $new -Destination $old -Force\n"
+        "Start-Sleep -Milliseconds 500\n"
+        f"Start-Process -FilePath $old -WorkingDirectory {workdir}\n"
+        "Remove-Item -LiteralPath $PSCommandPath -Force\n"
     )
+
+
+def _ps_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _sha256_file(path: Path) -> str:
