@@ -45,7 +45,14 @@ from PySide6.QtWidgets import (
 )
 
 from .autostart import disable_autostart, enable_autostart, is_autostart_enabled
-from .config import AppConfig, apply_automation_mode, save_config
+from .config import (
+    DEFAULT_GITHUB_OWNER,
+    DEFAULT_GITHUB_REPO,
+    DEFAULT_UPDATE_CHECK_INTERVAL_HOURS,
+    AppConfig,
+    apply_automation_mode,
+    save_config,
+)
 from .cpu_optimizer import CpuOptimizer
 from .cpu_throttler import CpuThrottler
 from .history_manager import HistoryManager
@@ -57,6 +64,7 @@ from .ram_cleaner import MEMORY_PURGE_STANDBY_LIST, RamCleanMode, RamCleaner, Ra
 from .sleep_manager import SleepAction, SleepManager
 from .smart_process_manager import CloseCandidate, SmartProcessManager
 from .updater import UpdateCheckResult, UpdateError, check_for_updates, download_and_install_update, is_repository_configured
+from .version import APP_VERSION
 from .whitelist import Whitelist
 
 LOGGER = logging.getLogger(__name__)
@@ -246,19 +254,17 @@ class UpdateCheckWorker(QObject):
 
     def __init__(self, config: AppConfig, *, force: bool) -> None:
         super().__init__()
-        self.owner = config.github_owner
-        self.repo = config.github_repo
-        self.auth_token = config.github_token
+        self.owner = DEFAULT_GITHUB_OWNER
+        self.repo = DEFAULT_GITHUB_REPO
         self.skipped_version = config.skipped_update_version
         self.force = force
-        self.cache_ttl_seconds = max(1.0, config.update_check_interval_hours) * 60 * 60
+        self.cache_ttl_seconds = DEFAULT_UPDATE_CHECK_INTERVAL_HOURS * 60 * 60
 
     def run(self) -> None:
         self.result_received.emit(
             check_for_updates(
                 owner=self.owner,
                 repo=self.repo,
-                auth_token=self.auth_token,
                 skipped_version=self.skipped_version,
                 force=self.force,
                 cache_ttl_seconds=self.cache_ttl_seconds,
@@ -651,6 +657,7 @@ class PCOptimizerQtWindow(QMainWindow):
         self._update_install_worker_obj: UpdateInstallWorker | None = None
         self._update_check_manual = False
         self._pending_update: UpdateCheckResult | None = None
+        self._update_action_mode = "check"
         self._syncing_controls = False
 
         self.setWindowTitle("PC Optimizer Lite")
@@ -1012,13 +1019,9 @@ class PCOptimizerQtWindow(QMainWindow):
         self.update_notify_check.setChecked(self.config.update_notify_enabled)
         self.update_auto_install_check = _toggle("Автоматически устанавливать обновления")
         self.update_auto_install_check.setChecked(self.config.auto_install_updates)
-        self.update_interval_edit = QLineEdit(str(self.config.update_check_interval_hours))
-        self.github_owner_edit = QLineEdit(self.config.github_owner)
-        self.github_repo_edit = QLineEdit(self.config.github_repo)
-        self.github_token_edit = QLineEdit(self.config.github_token)
-        self.github_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.github_token_edit.setPlaceholderText("опционально для приватного репозитория")
         self.check_updates_button = _button("Проверить обновления", "refresh", self.check_updates_now, self.palette)
+        self.check_updates_button.setObjectName("UpdateActionButton")
+        self.check_updates_button.setProperty("updateAvailable", False)
         self._preview_automation_mode()
 
         monitoring_section, monitoring_form = _settings_section("Мониторинг", self.palette)
@@ -1106,13 +1109,6 @@ class PCOptimizerQtWindow(QMainWindow):
         _form_row(updates_form, "", self.update_startup_check)
         _form_row(updates_form, "", self.update_notify_check)
         _form_row(updates_form, "", self.update_auto_install_check)
-        _form_row(updates_form, "Проверять не чаще, часов", self.update_interval_edit)
-        _form_row(updates_form, "GitHub owner", self.github_owner_edit)
-        _form_row(updates_form, "GitHub repo", self.github_repo_edit)
-        _form_row(updates_form, "GitHub token", self.github_token_edit)
-        token_hint = QLabel("Не требуется для публичного репозитория. Не передавайте этот токен никому.")
-        token_hint.setObjectName("SettingsHint")
-        updates_form.addRow(token_hint)
         _form_row(updates_form, "", self.check_updates_button)
         updates_hint = QLabel("По умолчанию используется kot04ka/pc-optimizer-lite. Для обновлений прикрепляйте новый portable .exe к GitHub Release.")
         updates_hint.setObjectName("SettingsHint")
@@ -1245,10 +1241,6 @@ class PCOptimizerQtWindow(QMainWindow):
             self.update_startup_check.setChecked(self.config.check_updates_on_startup)
             self.update_notify_check.setChecked(self.config.update_notify_enabled)
             self.update_auto_install_check.setChecked(self.config.auto_install_updates)
-            self.update_interval_edit.setText(str(self.config.update_check_interval_hours))
-            self.github_owner_edit.setText(self.config.github_owner)
-            self.github_repo_edit.setText(self.config.github_repo)
-            self.github_token_edit.setText(self.config.github_token)
             self.autostart_check.setChecked(is_autostart_enabled())
         finally:
             self._syncing_controls = False
@@ -1285,7 +1277,8 @@ class PCOptimizerQtWindow(QMainWindow):
         if hasattr(self, "save_settings_button"):
             self.save_settings_button.setIcon(_feather_icon("save", self.palette["bg"]))
         if hasattr(self, "check_updates_button"):
-            self.check_updates_button.setIcon(_feather_icon("refresh", self.palette["accent"]))
+            version = self._pending_update.latest_version if self._pending_update else ""
+            self._set_update_action_state(self._update_action_mode, version)
         if hasattr(self, "update_banner_button"):
             self.update_banner_button.setIcon(_feather_icon("arrow-down", self.palette["accent"]))
         if hasattr(self, "update_later_button"):
@@ -2167,10 +2160,6 @@ class PCOptimizerQtWindow(QMainWindow):
             self.config.check_updates_on_startup = self.update_startup_check.isChecked()
             self.config.update_notify_enabled = self.update_notify_check.isChecked()
             self.config.auto_install_updates = self.update_auto_install_check.isChecked()
-            self.config.update_check_interval_hours = float(self.update_interval_edit.text())
-            self.config.github_owner = self.github_owner_edit.text().strip()
-            self.config.github_repo = self.github_repo_edit.text().strip()
-            self.config.github_token = self.github_token_edit.text().strip()
         except ValueError:
             QMessageBox.critical(self, "Настройки", "Проверьте числовые значения.")
             return
@@ -2203,9 +2192,9 @@ class PCOptimizerQtWindow(QMainWindow):
         self.refresh_activity()
 
     def check_updates_now(self) -> None:
-        self.config.github_owner = self.github_owner_edit.text().strip()
-        self.config.github_repo = self.github_repo_edit.text().strip()
-        self.config.github_token = self.github_token_edit.text().strip()
+        if self._pending_update and self._pending_update.update_available:
+            self.install_pending_update()
+            return
         self._start_update_check(manual=True)
 
     def _maybe_check_updates_on_startup(self) -> None:
@@ -2215,12 +2204,12 @@ class PCOptimizerQtWindow(QMainWindow):
     def _start_update_check(self, *, manual: bool) -> None:
         if self._update_thread and self._update_thread.isRunning():
             return
-        if not is_repository_configured(self.config.github_owner, self.config.github_repo):
+        if not is_repository_configured(DEFAULT_GITHUB_OWNER, DEFAULT_GITHUB_REPO):
             if manual:
                 QMessageBox.information(
                     self,
                     "Обновления",
-                    "Укажите GitHub owner/repo в настройках или замените placeholders в коде updater.py.",
+                    "Репозиторий обновлений не настроен.",
                 )
             return
         thread = QThread(self)
@@ -2236,6 +2225,7 @@ class PCOptimizerQtWindow(QMainWindow):
         self._update_thread = thread
         self._update_worker_obj = worker
         if manual:
+            self._set_update_action_state("checking")
             self.statusBar().showMessage("Проверяю GitHub Releases...", 2500)
         thread.start()
 
@@ -2244,14 +2234,20 @@ class PCOptimizerQtWindow(QMainWindow):
         if not result.configured:
             if manual:
                 QMessageBox.information(self, "Обновления", "GitHub репозиторий пока не настроен.")
+                self._set_update_action_state("check")
             return
         if result.skipped and not manual:
             return
         if not result.update_available:
+            self._pending_update = None
+            self._set_update_action_state("check")
             if manual:
-                QMessageBox.information(self, "Обновления", result.message or "Новых версий нет.")
+                if not result.message.startswith("Update check failed quietly"):
+                    latest = result.latest_version or APP_VERSION
+                    QMessageBox.information(self, "Обновления", f"У вас последняя версия {latest}.")
             return
         self._pending_update = result
+        self._set_update_action_state("install", result.latest_version)
         self._show_update_banner(result)
         self._refresh_tray_state()
         if self.config.auto_install_updates:
@@ -2292,13 +2288,41 @@ class PCOptimizerQtWindow(QMainWindow):
         elif clicked == later_button:
             self.statusBar().showMessage("Обновление отложено.", 2500)
 
+    def _set_update_action_state(self, mode: str, version: str = "") -> None:
+        if not hasattr(self, "check_updates_button"):
+            return
+        self._update_action_mode = mode
+        button = self.check_updates_button
+        if mode == "checking":
+            button.setText("Проверяю...")
+            button.setEnabled(False)
+            button.setProperty("updateAvailable", False)
+            button.setIcon(_feather_icon("refresh", self.palette["accent"]))
+        elif mode == "install":
+            button.setText(f"Обновить до {version}" if version else "Обновить")
+            button.setEnabled(True)
+            button.setProperty("updateAvailable", True)
+            button.setIcon(_feather_icon("arrow-down", self.palette["bg"]))
+        elif mode == "downloading":
+            button.setText("Загрузка... 0%")
+            button.setEnabled(False)
+            button.setProperty("updateAvailable", True)
+            button.setIcon(_feather_icon("arrow-down", self.palette["bg"]))
+        else:
+            button.setText("Проверить обновления")
+            button.setEnabled(True)
+            button.setProperty("updateAvailable", False)
+            button.setIcon(_feather_icon("refresh", self.palette["accent"]))
+        button.style().unpolish(button)
+        button.style().polish(button)
+        button.update()
+
     def _show_update_banner(self, result: UpdateCheckResult) -> None:
-        asset_name = result.asset.name if result.asset else "asset"
-        self.update_banner_label.setText(f"Доступна версия {result.latest_version} — {asset_name}")
+        self.update_banner_label.setText(f"Доступна версия {result.latest_version} — Обновить")
         self.update_download_progress.setValue(0)
         self.update_download_progress.setVisible(False)
         self.update_banner_button.setEnabled(True)
-        self.update_banner_button.setText("Обновить")
+        self.update_banner_button.setText(f"Обновить до {result.latest_version}")
         self.update_banner.setVisible(True)
 
     def hide_update_banner(self) -> None:
@@ -2331,14 +2355,20 @@ class PCOptimizerQtWindow(QMainWindow):
         self.update_download_progress.setValue(0)
         self.update_download_progress.setVisible(True)
         self.update_banner_button.setEnabled(False)
-        self.update_banner_button.setText("Скачиваю...")
+        self.update_banner_button.setText("Загрузка...")
+        self._set_update_action_state("downloading")
         self.statusBar().showMessage("Скачиваю и подготавливаю обновление...", 4000)
         thread.start()
 
     def _on_update_install_progress(self, percent: int, message: str) -> None:
+        percent = max(0, min(100, percent))
         self.update_download_progress.setVisible(True)
-        self.update_download_progress.setValue(max(0, min(100, percent)))
-        self.update_banner_label.setText(message)
+        self.update_download_progress.setValue(percent)
+        progress_text = f"Загрузка... {percent}%"
+        self.update_banner_label.setText(progress_text)
+        self.update_banner_button.setText(progress_text)
+        if hasattr(self, "check_updates_button"):
+            self.check_updates_button.setText(progress_text)
 
     def _on_update_install_result(self, script_path: Path) -> None:
         self.history.add_event(
@@ -2350,16 +2380,26 @@ class PCOptimizerQtWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Обновление",
-            "Обновление скачано. Приложение сейчас закроется, заменит exe и запустится заново.",
+            "Установка, приложение перезапустится.",
         )
+        self.update_banner_label.setText("Установка, приложение перезапустится")
+        self.update_banner_button.setText("Установка...")
+        if hasattr(self, "check_updates_button"):
+            self.check_updates_button.setText("Установка...")
         self._allow_close = True
         QApplication.instance().quit()
 
     def _on_update_install_error(self, message: str) -> None:
         self.history.add_event("updates", "Update failed", message, "error")
         self.update_banner_button.setEnabled(True)
-        self.update_banner_button.setText("Обновить")
+        self.update_banner_button.setText(
+            f"Обновить до {self._pending_update.latest_version}" if self._pending_update else "Обновить"
+        )
         self.update_download_progress.setVisible(False)
+        if self._pending_update:
+            self._set_update_action_state("install", self._pending_update.latest_version)
+        else:
+            self._set_update_action_state("check")
         QMessageBox.warning(self, "Обновление", message)
         self.refresh_activity()
 
@@ -2789,6 +2829,15 @@ def _qss(palette: dict[str, str]) -> str:
     QPushButton:disabled, QToolButton:disabled {{
         color: {palette["muted"]};
         background: {palette["panel"]};
+    }}
+    QPushButton#UpdateActionButton[updateAvailable="true"] {{
+        background: {palette["accent"]};
+        color: {palette["bg"]};
+        border: none;
+        font-weight: 750;
+    }}
+    QPushButton#UpdateActionButton[updateAvailable="true"]:hover {{
+        background: {_mix(QColor(palette["accent"]), QColor(palette["good"]), 0.18).name()};
     }}
     QPushButton#SaveButton {{
         background: {palette["accent"]};

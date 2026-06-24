@@ -16,13 +16,14 @@ DEFAULT_CONFIG_FILENAME = "config.json"
 DEFAULT_LOG_FILENAME = "pc_optimizer_lite.log"
 DEFAULT_GITHUB_OWNER = "kot04ka"
 DEFAULT_GITHUB_REPO = "pc-optimizer-lite"
+DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 4.0
 
 
 @dataclass(slots=True)
 class AppConfig:
     """Runtime settings persisted between application launches."""
 
-    config_version: int = 4
+    config_version: int = 5
     monitor_interval_seconds: float = 3.0
     process_refresh_seconds: float = 6.0
     lite_mode_enabled: bool = False
@@ -82,12 +83,11 @@ class AppConfig:
     optimize_step_cleanup_enabled: bool = True
     check_updates_on_startup: bool = True
     update_notify_enabled: bool = True
-    update_check_interval_hours: float = 4.0
+    update_check_interval_hours: float = DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
     auto_install_updates: bool = False
     skipped_update_version: str = ""
     github_owner: str = DEFAULT_GITHUB_OWNER
     github_repo: str = DEFAULT_GITHUB_REPO
-    github_token: str = ""
 
 
 def get_app_data_dir() -> Path:
@@ -195,11 +195,10 @@ def sanitize_config(config: AppConfig) -> AppConfig:
         "auto_install_updates",
     ):
         setattr(config, key, bool(getattr(config, key)))
-    config.update_check_interval_hours = max(1.0, float(config.update_check_interval_hours))
+    config.update_check_interval_hours = DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
     config.skipped_update_version = str(config.skipped_update_version).strip()
     config.github_owner = str(config.github_owner).strip() or DEFAULT_GITHUB_OWNER
     config.github_repo = str(config.github_repo).strip() or DEFAULT_GITHUB_REPO
-    config.github_token = str(config.github_token).strip()
     if config.github_owner == "YOUR_GITHUB_OWNER":
         config.github_owner = DEFAULT_GITHUB_OWNER
     if config.github_repo == "YOUR_GITHUB_REPO":
@@ -276,15 +275,17 @@ def _migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
         migrated.setdefault("optimize_step_cleanup_enabled", True)
         migrated.setdefault("check_updates_on_startup", True)
         migrated.setdefault("update_notify_enabled", True)
-        migrated.setdefault("update_check_interval_hours", 4.0)
+        migrated.setdefault("update_check_interval_hours", DEFAULT_UPDATE_CHECK_INTERVAL_HOURS)
         migrated.setdefault("auto_install_updates", False)
         migrated.setdefault("skipped_update_version", "")
         migrated.setdefault("github_owner", DEFAULT_GITHUB_OWNER)
         migrated.setdefault("github_repo", DEFAULT_GITHUB_REPO)
         migrated["config_version"] = 3
     if version < 4:
-        migrated.setdefault("github_token", "")
         migrated["config_version"] = 4
+    if version < 5:
+        migrated["update_check_interval_hours"] = DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
+        migrated["config_version"] = 5
     return migrated
 
 
