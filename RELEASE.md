@@ -65,6 +65,6 @@ The app checks:
 https://api.github.com/repos/kot04ka/pc-optimizer-lite/releases/latest
 ```
 
-Public repositories work without credentials. If `kot04ka/pc-optimizer-lite` stays private, each installed app must have a local GitHub token in Settings -> "Обновления GitHub" or in `PC_OPTIMIZER_GITHUB_TOKEN`; do not hardcode tokens into the source or built exe.
+Public repositories work without credentials. The optional GitHub token field is empty by default and is only for private repositories. If a user enters a token, it is stored only in the local `%APPDATA%\PC Optimizer Lite\config.json`; do not hardcode tokens into the source, commits, releases, or built exe.
 
 After the Release is published, users with "Проверять обновления при запуске" enabled will see the "Обновить" banner in the app.

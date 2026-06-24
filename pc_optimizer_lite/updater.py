@@ -72,7 +72,7 @@ def check_for_updates(
 
     owner = owner.strip()
     repo = repo.strip()
-    auth_token = (auth_token or os.environ.get("PC_OPTIMIZER_GITHUB_TOKEN") or "").strip()
+    auth_token = (auth_token or "").strip()
     if not is_repository_configured(owner, repo):
         return UpdateCheckResult(
             configured=False,
