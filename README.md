@@ -1,4 +1,4 @@
-# PC Optimizer Lite
+﻿# PC Optimizer Lite
 
 Лёгкое Python-приложение для пассивного мониторинга Windows/Linux/macOS через `psutil`.
 Основной GUI сделан на PySide6: тёмная тема, карточки метрик, живые графики и tray-режим.
@@ -73,7 +73,7 @@ python main.py
 
 ## Готовая сборка
 
-Версия: `1.2.0`
+Версия: `1.3.0`
 
 Дата сборки: `2026-06-23`
 
@@ -86,7 +86,7 @@ C:\Users\1\Documents\CleenChile\dist\PC Optimizer Lite.exe
 Установщик:
 
 ```text
-C:\Users\1\Documents\CleenChile\installer_output\PC Optimizer Lite Setup 1.2.0.exe
+C:\Users\1\Documents\CleenChile\installer_output\PC-Optimizer-Lite-Setup.exe
 ```
 
 Команда пересборки с нуля из корня проекта:
@@ -109,6 +109,14 @@ CPU считался по дельте `Get-Process.CPU` за 30 секунд и
 - Главные устранённые причины прежних ~15% CPU: постоянный обход процессов, дублирующий process refresh, отдельный repaint-таймер графика, температурные WMI/sensor-probes на системе без датчиков и отсутствие фонового low-power режима при `--tray`.
 
 ## Changelog
+
+### 1.3.0
+
+- Добавлен режим слабого ПК: редкие опросы, упрощённый график, меньший буфер точек и более длинные паузы между шагами.
+- One-click оптимизация стала пошаговой: UI показывает текущий шаг, прогресс и корректно останавливается после текущего шага.
+- Ручная RAM/temp очистка, обновление таблицы процессов и проверка обновлений вынесены в worker-потоки.
+- Добавлен updater GitHub Releases для `kot04ka/pc-optimizer-lite`: баннер "Обновить", фоновая проверка, кэш запросов, скачивание и bat-замена exe.
+- Добавлены RELEASE.md и GitHub Actions workflow для будущих релизов.
 
 ### 1.2.0
 
@@ -149,3 +157,4 @@ CPU считался по дельте `Get-Process.CPU` за 30 секунд и
 ```powershell
 python -m unittest discover -s tests
 ```
+

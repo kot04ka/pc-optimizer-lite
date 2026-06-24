@@ -1,0 +1,53 @@
+name: Build Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build app
+        shell: powershell
+        run: .\build.bat
+
+      - name: Prepare release notes
+        shell: powershell
+        run: |
+          $portable = "dist\PC Optimizer Lite.exe"
+          $hash = (Get-FileHash -LiteralPath $portable -Algorithm SHA256).Hash.ToLowerInvariant()
+          "Automated build for $env:GITHUB_REF_NAME`n`nsha256: $hash" | Set-Content -LiteralPath RELEASE_NOTES.md -Encoding UTF8
+
+      - name: Publish GitHub Release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag `
+              "dist\PC Optimizer Lite.exe#PC-Optimizer-Lite.exe" `
+              "installer_output\PC-Optimizer-Lite-Setup.exe#PC-Optimizer-Lite-Setup.exe" `
+              --title "PC Optimizer Lite $tag" `
+              --notes-file RELEASE_NOTES.md
+          } else {
+            gh release upload $tag `
+              "dist\PC Optimizer Lite.exe#PC-Optimizer-Lite.exe" `
+              "installer_output\PC-Optimizer-Lite-Setup.exe#PC-Optimizer-Lite-Setup.exe" `
+              --clobber
+          }

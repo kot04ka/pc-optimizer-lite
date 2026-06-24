@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+installer_output/
+.tmp_appdata_source/
+.agents/
+*.spec
+!PC Optimizer Lite.spec
+*.exe
+*.pkg
+*.log
