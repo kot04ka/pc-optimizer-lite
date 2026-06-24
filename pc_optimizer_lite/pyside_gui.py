@@ -1105,14 +1105,11 @@ class PCOptimizerQtWindow(QMainWindow):
         steps_form.addRow(steps_hint)
         content_layout.addWidget(steps_section)
 
-        updates_section, updates_form = _settings_section("Обновления GitHub", self.palette)
+        updates_section, updates_form = _settings_section("Обновления", self.palette)
         _form_row(updates_form, "", self.update_startup_check)
         _form_row(updates_form, "", self.update_notify_check)
         _form_row(updates_form, "", self.update_auto_install_check)
         _form_row(updates_form, "", self.check_updates_button)
-        updates_hint = QLabel("По умолчанию используется kot04ka/pc-optimizer-lite. Для обновлений прикрепляйте новый portable .exe к GitHub Release.")
-        updates_hint.setObjectName("SettingsHint")
-        updates_form.addRow(updates_hint)
         content_layout.addWidget(updates_section)
 
         content_layout.addStretch(1)

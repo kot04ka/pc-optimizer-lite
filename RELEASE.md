@@ -11,7 +11,7 @@ pc_optimizer_lite/version.py
 Set:
 
 ```python
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 ```
 
 Keep `pyproject.toml` in sync for package metadata.
@@ -36,8 +36,8 @@ installer_output\PC-Optimizer-Lite-Setup.exe
 Create a tag matching the version:
 
 ```powershell
-git tag v1.3.1
-git push origin v1.3.1
+git tag v1.3.2
+git push origin v1.3.2
 ```
 
 Then create a GitHub Release for that tag and attach these assets:
@@ -57,7 +57,7 @@ The updater prefers the portable exe asset and uses the release tag for semver c
 
 ## 4. Automatic Build From Tags
 
-The workflow in `.github/workflows/build.yml` builds and uploads release assets automatically when a tag like `v1.3.1` is pushed.
+The workflow in `.github/workflows/build.yml` builds and uploads release assets automatically when a tag like `v1.3.2` is pushed.
 
 The app checks:
 
