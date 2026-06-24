@@ -22,7 +22,7 @@ DEFAULT_GITHUB_REPO = "pc-optimizer-lite"
 class AppConfig:
     """Runtime settings persisted between application launches."""
 
-    config_version: int = 3
+    config_version: int = 4
     monitor_interval_seconds: float = 3.0
     process_refresh_seconds: float = 6.0
     lite_mode_enabled: bool = False
@@ -87,6 +87,7 @@ class AppConfig:
     skipped_update_version: str = ""
     github_owner: str = DEFAULT_GITHUB_OWNER
     github_repo: str = DEFAULT_GITHUB_REPO
+    github_token: str = ""
 
 
 def get_app_data_dir() -> Path:
@@ -198,6 +199,7 @@ def sanitize_config(config: AppConfig) -> AppConfig:
     config.skipped_update_version = str(config.skipped_update_version).strip()
     config.github_owner = str(config.github_owner).strip() or DEFAULT_GITHUB_OWNER
     config.github_repo = str(config.github_repo).strip() or DEFAULT_GITHUB_REPO
+    config.github_token = str(config.github_token).strip()
     if config.github_owner == "YOUR_GITHUB_OWNER":
         config.github_owner = DEFAULT_GITHUB_OWNER
     if config.github_repo == "YOUR_GITHUB_REPO":
@@ -280,6 +282,9 @@ def _migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
         migrated.setdefault("github_owner", DEFAULT_GITHUB_OWNER)
         migrated.setdefault("github_repo", DEFAULT_GITHUB_REPO)
         migrated["config_version"] = 3
+    if version < 4:
+        migrated.setdefault("github_token", "")
+        migrated["config_version"] = 4
     return migrated
 
 

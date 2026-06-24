@@ -248,6 +248,7 @@ class UpdateCheckWorker(QObject):
         super().__init__()
         self.owner = config.github_owner
         self.repo = config.github_repo
+        self.auth_token = config.github_token
         self.skipped_version = config.skipped_update_version
         self.force = force
         self.cache_ttl_seconds = max(1.0, config.update_check_interval_hours) * 60 * 60
@@ -257,6 +258,7 @@ class UpdateCheckWorker(QObject):
             check_for_updates(
                 owner=self.owner,
                 repo=self.repo,
+                auth_token=self.auth_token,
                 skipped_version=self.skipped_version,
                 force=self.force,
                 cache_ttl_seconds=self.cache_ttl_seconds,
@@ -1013,6 +1015,9 @@ class PCOptimizerQtWindow(QMainWindow):
         self.update_interval_edit = QLineEdit(str(self.config.update_check_interval_hours))
         self.github_owner_edit = QLineEdit(self.config.github_owner)
         self.github_repo_edit = QLineEdit(self.config.github_repo)
+        self.github_token_edit = QLineEdit(self.config.github_token)
+        self.github_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.github_token_edit.setPlaceholderText("опционально для приватного репозитория")
         self.check_updates_button = _button("Проверить обновления", "refresh", self.check_updates_now, self.palette)
         self._preview_automation_mode()
 
@@ -1104,8 +1109,9 @@ class PCOptimizerQtWindow(QMainWindow):
         _form_row(updates_form, "Проверять не чаще, часов", self.update_interval_edit)
         _form_row(updates_form, "GitHub owner", self.github_owner_edit)
         _form_row(updates_form, "GitHub repo", self.github_repo_edit)
+        _form_row(updates_form, "GitHub token", self.github_token_edit)
         _form_row(updates_form, "", self.check_updates_button)
-        updates_hint = QLabel("По умолчанию используется kot04ka/pc-optimizer-lite. Для обновлений прикрепляйте новый portable .exe к GitHub Release.")
+        updates_hint = QLabel("По умолчанию используется kot04ka/pc-optimizer-lite. Для приватного репозитория нужен локальный token с доступом к Releases.")
         updates_hint.setObjectName("SettingsHint")
         updates_form.addRow(updates_hint)
         content_layout.addWidget(updates_section)
@@ -1239,6 +1245,7 @@ class PCOptimizerQtWindow(QMainWindow):
             self.update_interval_edit.setText(str(self.config.update_check_interval_hours))
             self.github_owner_edit.setText(self.config.github_owner)
             self.github_repo_edit.setText(self.config.github_repo)
+            self.github_token_edit.setText(self.config.github_token)
             self.autostart_check.setChecked(is_autostart_enabled())
         finally:
             self._syncing_controls = False
@@ -2160,6 +2167,7 @@ class PCOptimizerQtWindow(QMainWindow):
             self.config.update_check_interval_hours = float(self.update_interval_edit.text())
             self.config.github_owner = self.github_owner_edit.text().strip()
             self.config.github_repo = self.github_repo_edit.text().strip()
+            self.config.github_token = self.github_token_edit.text().strip()
         except ValueError:
             QMessageBox.critical(self, "Настройки", "Проверьте числовые значения.")
             return
@@ -2194,6 +2202,7 @@ class PCOptimizerQtWindow(QMainWindow):
     def check_updates_now(self) -> None:
         self.config.github_owner = self.github_owner_edit.text().strip()
         self.config.github_repo = self.github_repo_edit.text().strip()
+        self.config.github_token = self.github_token_edit.text().strip()
         self._start_update_check(manual=True)
 
     def _maybe_check_updates_on_startup(self) -> None:

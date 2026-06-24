@@ -39,6 +39,7 @@ class ReleaseAsset:
     url: str
     size: int = 0
     sha256: str = ""
+    auth_token: str = ""
 
 
 @dataclass(slots=True)
@@ -60,6 +61,7 @@ def check_for_updates(
     *,
     owner: str,
     repo: str,
+    auth_token: str = "",
     current_version: str = APP_VERSION,
     skipped_version: str = "",
     timeout_seconds: float = 6.0,
@@ -70,6 +72,7 @@ def check_for_updates(
 
     owner = owner.strip()
     repo = repo.strip()
+    auth_token = (auth_token or os.environ.get("PC_OPTIMIZER_GITHUB_TOKEN") or "").strip()
     if not is_repository_configured(owner, repo):
         return UpdateCheckResult(
             configured=False,
@@ -83,15 +86,12 @@ def check_for_updates(
             and cached.get("repo") == repo
             and time.time() - float(cached.get("checked_at") or 0.0) < cache_ttl_seconds
         ):
-            return _result_from_cache(cached, current_version, skipped_version)
+            return _result_from_cache(cached, current_version, skipped_version, auth_token)
 
     api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
     request = urllib.request.Request(
         api_url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": f"{__app_name__}/{current_version}",
-        },
+        headers=_github_headers(current_version, auth_token),
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
@@ -107,7 +107,7 @@ def check_for_updates(
     if latest_version == _normalize_version(skipped_version):
         return UpdateCheckResult(configured=True, latest_version=latest_version, skipped=True)
     body = str(payload.get("body") or "")
-    asset = _select_windows_exe_asset(payload.get("assets", []), body)
+    asset = _select_windows_exe_asset(payload.get("assets", []), body, auth_token)
     if not is_newer_version(latest_version, current_version):
         if (
             latest_version == _normalize_version(current_version)
@@ -188,7 +188,7 @@ def download_update_asset(
     target = destination / safe_name
     request = urllib.request.Request(
         asset.url,
-        headers={"User-Agent": f"{__app_name__}/{__version__}"},
+        headers=_github_headers(APP_VERSION, asset.auth_token),
     )
     downloaded = 0
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
@@ -265,7 +265,7 @@ def _asset_differs_from_current_exe(asset: ReleaseAsset) -> bool:
     return False
 
 
-def _select_windows_exe_asset(raw_assets: Any, release_body: str) -> ReleaseAsset | None:
+def _select_windows_exe_asset(raw_assets: Any, release_body: str, auth_token: str = "") -> ReleaseAsset | None:
     if not isinstance(raw_assets, list):
         return None
     hashes = _sha256_hashes_from_text(release_body)
@@ -283,6 +283,7 @@ def _select_windows_exe_asset(raw_assets: Any, release_body: str) -> ReleaseAsse
                 url=url,
                 size=int(item.get("size") or 0),
                 sha256=hashes.get(name.lower(), "") or hashes.get("*", ""),
+                auth_token=auth_token,
             )
         )
     if not candidates:
@@ -335,7 +336,12 @@ def _save_cached_update_check(owner: str, repo: str, result: UpdateCheckResult) 
         pass
 
 
-def _result_from_cache(cache: dict[str, Any], current_version: str, skipped_version: str) -> UpdateCheckResult:
+def _result_from_cache(
+    cache: dict[str, Any],
+    current_version: str,
+    skipped_version: str,
+    auth_token: str = "",
+) -> UpdateCheckResult:
     latest_version = str(cache.get("latest_version") or "")
     if latest_version and latest_version == _normalize_version(skipped_version):
         return UpdateCheckResult(configured=True, latest_version=latest_version, skipped=True, message="Skipped version.")
@@ -346,6 +352,7 @@ def _result_from_cache(cache: dict[str, Any], current_version: str, skipped_vers
             url=str(asset_payload.get("url") or ""),
             size=int(asset_payload.get("size") or 0),
             sha256=str(asset_payload.get("sha256") or ""),
+            auth_token=auth_token,
         )
         if asset_payload
         else None
@@ -365,6 +372,16 @@ def _result_from_cache(cache: dict[str, Any], current_version: str, skipped_vers
         skipped=bool(cache.get("skipped")),
         message=str(cache.get("message") or "Cached update check."),
     )
+
+
+def _github_headers(version: str, auth_token: str = "") -> dict[str, str]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": f"{__app_name__}/{version}",
+    }
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    return headers
 
 
 def _sha256_hashes_from_text(text: str) -> dict[str, str]:
