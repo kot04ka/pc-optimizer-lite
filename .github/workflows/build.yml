@@ -33,13 +33,13 @@ jobs:
           $portableHash = (Get-FileHash -LiteralPath $portable -Algorithm SHA256).Hash.ToLowerInvariant()
           $setupHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
           $notes = @(
-            "Hot-fix: Исправлена задержка ввода в Telegram, Discord и других интерактивных приложениях при работе оптимизатора.",
+            "Hot-fix: fixed input lag in Telegram, Discord, browsers, editors, and other interactive apps while the optimizer is running.",
             "",
-            "Что изменено:",
-            "- CPU priority/affinity больше не применяется к активному окну, видимым интерактивным приложениям и известным мессенджерам/браузерам/редакторам.",
-            "- Если пользователь возвращает окно в фокус, ранее примененные CPU-ограничения немедленно восстанавливаются.",
-            "- Старт приложения стал мягче: мониторинг запускается с задержкой, первый тяжелый сбор таблицы процессов откладывается, проверка обновлений не стартует одновременно с GUI.",
-            "- Подтверждено: глобальные хуки клавиатуры/мыши не используются; активность пользователя определяется через GetLastInputInfo().",
+            "Changes:",
+            "- CPU priority/affinity relief now skips the active window, visible interactive apps, and known messengers/browsers/editors.",
+            "- Previously applied CPU limits are restored immediately when the user focuses the affected app.",
+            "- Startup is softer: monitoring starts after a delay, the first heavy process-table refresh is deferred, and update checks no longer start together with the GUI.",
+            "- Confirmed: no global keyboard/mouse hooks are used; user activity is checked with GetLastInputInfo().",
             "",
             "PC-Optimizer-Lite.exe sha256: $portableHash",
             "PC.Optimizer.Lite.exe sha256: $portableHash",
