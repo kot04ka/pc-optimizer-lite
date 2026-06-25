@@ -13,8 +13,9 @@ from pc_optimizer_lite.cpu_throttler import CpuThrottler
 from pc_optimizer_lite.history_manager import HistoryManager
 from pc_optimizer_lite.monitor import DiskIOInfo, MemoryInfo, MonitorSnapshot, ProcessInfo, SwapInfo
 from pc_optimizer_lite.optimize_action import ProcessOptimizationSnapshot, _classify_processes, _step_enabled
-from pc_optimizer_lite.optimizer import SystemOptimizer
+from pc_optimizer_lite.optimizer import CleanupTarget, SystemOptimizer
 from pc_optimizer_lite.ram_cleaner import RamCleanMode, RamCleanResult
+from pc_optimizer_lite.sleep_manager import SKIP_SLEEP_NAMES, SleepManager
 from pc_optimizer_lite.smart_process_manager import SmartProcessManager
 from pc_optimizer_lite.updater import is_newer_version, is_repository_configured
 from pc_optimizer_lite.whitelist import Whitelist
@@ -52,7 +53,25 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.sleep_enabled)
         self.assertTrue(config.ram_auto_clean_enabled)
         self.assertTrue(config.cpu_throttle_enabled)
+        self.assertTrue(config.scheduled_cleanup_enabled)
+        self.assertTrue(config.scheduled_cleanup_notify)
+        self.assertTrue(config.periodic_optimization_enabled)
+        self.assertTrue(config.periodic_optimization_notify)
         self.assertEqual(config.auto_close_mode, "auto")
+
+    def test_auto_cleanup_settings_are_clamped(self) -> None:
+        config = sanitize_config(
+            AppConfig(
+                auto_cleanup_cooldown_minutes=0.1,
+                cleanup_logs_older_than_days=0,
+                cleanup_prefetch_enabled=True,
+                cleanup_recycle_bin_enabled=True,
+            )
+        )
+        self.assertGreaterEqual(config.auto_cleanup_cooldown_minutes, 3.0)
+        self.assertGreaterEqual(config.cleanup_logs_older_than_days, 1)
+        self.assertTrue(config.cleanup_prefetch_enabled)
+        self.assertTrue(config.cleanup_recycle_bin_enabled)
 
     def test_lite_mode_uses_slower_polling(self) -> None:
         config = sanitize_config(
@@ -114,6 +133,75 @@ class CleanupTests(unittest.TestCase):
             self.assertEqual(result.deleted_files, 1)
             self.assertTrue(file_path.exists())
             self.assertIn("Temp", result.categories)
+
+    def test_cleanup_targets_respect_disabled_categories(self) -> None:
+        config = AppConfig(
+            cleanup_temp_enabled=False,
+            cleanup_browser_cache_enabled=False,
+            cleanup_windows_temp_enabled=False,
+            cleanup_logs_enabled=False,
+        )
+        whitelist = Whitelist(config)
+        optimizer = SystemOptimizer(whitelist, config)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            temp_root = root / "temp"
+            browser_root = root / "browser"
+            windows_root = root / "windows-temp"
+            for path in (temp_root, browser_root, windows_root):
+                path.mkdir()
+            original_get_roots = optimizer.get_safe_temp_roots
+            original_browser_targets = optimizer._browser_cache_targets
+            optimizer.get_safe_temp_roots = lambda: [temp_root]  # type: ignore[method-assign]
+            optimizer._browser_cache_targets = lambda: [  # type: ignore[method-assign]
+                CleanupTarget(browser_root, "Browser cache"),
+                CleanupTarget(windows_root, "Windows temp"),
+            ]
+            try:
+                self.assertEqual(optimizer.get_safe_cleanup_targets(), [])
+            finally:
+                optimizer.get_safe_temp_roots = original_get_roots  # type: ignore[method-assign]
+                optimizer._browser_cache_targets = original_browser_targets  # type: ignore[method-assign]
+
+    def test_cleanup_scan_yields_between_batches(self) -> None:
+        whitelist = Whitelist(AppConfig())
+        optimizer = SystemOptimizer(whitelist)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for index in range(3):
+                (root / f"sample-{index}.tmp").write_bytes(b"12345")
+            original_get_roots = optimizer.get_safe_temp_roots
+            optimizer.get_safe_temp_roots = lambda: [root]  # type: ignore[method-assign]
+            pauses: list[float] = []
+            try:
+                plan = optimizer.scan_cleanup_files(
+                    targets=[CleanupTarget(root, "Temp")],
+                    batch_size=1,
+                    pause_seconds=0.01,
+                    sleep_func=pauses.append,
+                )
+            finally:
+                optimizer.get_safe_temp_roots = original_get_roots  # type: ignore[method-assign]
+            self.assertEqual(plan.file_count, 3)
+            self.assertGreaterEqual(len(pauses), 2)
+
+
+class SleepManagerTests(unittest.TestCase):
+    def test_browser_names_are_not_absolute_sleep_skips(self) -> None:
+        self.assertNotIn("msedge.exe", SKIP_SLEEP_NAMES)
+        self.assertNotIn("chrome.exe", SKIP_SLEEP_NAMES)
+        self.assertNotIn("firefox.exe", SKIP_SLEEP_NAMES)
+
+    def test_focus_usage_stats_track_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = AppConfig()
+            manager = SleepManager(Whitelist(config), HistoryManager(path=Path(tmp) / "history.json"))
+            manager._record_focus_transition(10, 100.0)  # noqa: SLF001
+            manager._record_focus_transition(20, 160.0)  # noqa: SLF001
+            stats = manager.usage_stats.get(10)
+            self.assertIsNotNone(stats)
+            self.assertEqual(stats.focus_count, 1)  # type: ignore[union-attr]
+            self.assertEqual(stats.total_focus_seconds, 60.0)  # type: ignore[union-attr]
 
 
 class HistoryTests(unittest.TestCase):

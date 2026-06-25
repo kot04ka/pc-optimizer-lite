@@ -105,7 +105,14 @@ class RamCleaner:
             if pid not in seen:
                 self._low_cpu_since.pop(pid, None)
 
-    def clean(self, mode: RamCleanMode = RamCleanMode.LIGHT, min_low_cpu_seconds: float = 120.0) -> RamCleanResult:
+    def clean(
+        self,
+        mode: RamCleanMode = RamCleanMode.LIGHT,
+        min_low_cpu_seconds: float = 120.0,
+        *,
+        batch_size: int = 8,
+        pause_seconds: float = 0.07,
+    ) -> RamCleanResult:
         """Run targeted RAM cleanup and return a detailed report."""
 
         before = psutil.virtual_memory()
@@ -117,9 +124,11 @@ class RamCleaner:
             ram_percent_after=float(before.percent),
         )
         candidates = self.find_candidates(min_low_cpu_seconds=min_low_cpu_seconds)
-        for proc in candidates:
+        for index, proc in enumerate(candidates, start=1):
             item = self._empty_working_set(proc)
             result.process_results.append(item)
+            if pause_seconds and index % max(1, int(batch_size)) == 0:
+                time.sleep(max(0.0, float(pause_seconds)))
 
         if mode == RamCleanMode.DEEP:
             if not is_admin():
@@ -152,7 +161,11 @@ class RamCleaner:
         visible_pids = get_visible_window_pids()
         now = time.monotonic()
         candidates: list[tuple[int, psutil.Process]] = []
+        scanned = 0
         for proc in psutil.process_iter(attrs=("pid", "name", "exe", "memory_info", "cpu_percent")):
+            scanned += 1
+            if scanned % 40 == 0:
+                time.sleep(0.02)
             try:
                 pid = int(proc.info.get("pid") or proc.pid)
                 name = str(proc.info.get("name") or proc.name())
