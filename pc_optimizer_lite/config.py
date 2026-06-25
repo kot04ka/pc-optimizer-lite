@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+import psutil
+
 from . import __app_name__
 
 MIN_MONITOR_INTERVAL_SECONDS = 2.0
@@ -19,11 +21,22 @@ DEFAULT_GITHUB_REPO = "pc-optimizer-lite"
 DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 4.0
 
 
+@dataclass(frozen=True, slots=True)
+class HardwareProfile:
+    """Small hardware summary used to choose conservative first-run defaults."""
+
+    cpu_cores: int
+    ram_bytes: int
+    disk_kind: str = "unknown"
+
+
 @dataclass(slots=True)
 class AppConfig:
     """Runtime settings persisted between application launches."""
 
-    config_version: int = 6
+    config_version: int = 7
+    optimal_preset_tier: str = "balanced"
+    optimal_preset_applied: bool = False
     monitor_interval_seconds: float = 3.0
     process_refresh_seconds: float = 6.0
     lite_mode_enabled: bool = False
@@ -132,6 +145,12 @@ def sanitize_config(config: AppConfig) -> AppConfig:
     )
     config.lite_mode_enabled = bool(config.lite_mode_enabled)
     config.lite_mode_prompted = bool(config.lite_mode_prompted)
+    config.optimal_preset_tier = (
+        config.optimal_preset_tier
+        if config.optimal_preset_tier in {"low", "balanced", "high"}
+        else "balanced"
+    )
+    config.optimal_preset_applied = bool(config.optimal_preset_applied)
     if config.lite_mode_enabled:
         config.monitor_interval_seconds = max(config.monitor_interval_seconds, 3.5)
         config.process_refresh_seconds = max(config.process_refresh_seconds, 12.0)
@@ -251,8 +270,88 @@ def apply_automation_mode(config: AppConfig) -> AppConfig:
         config.periodic_optimization_notify = True
         config.scheduled_cleanup_enabled = True
         config.scheduled_cleanup_notify = True
-        config.auto_close_mode = "auto"
+        config.auto_close_mode = "off"
     return config
+
+
+def detect_hardware_profile() -> HardwareProfile:
+    """Detect enough hardware to pick a safe default preset without slow probes."""
+
+    cpu_cores = os.cpu_count() or 2
+    try:
+        ram_bytes = int(psutil.virtual_memory().total)
+    except Exception:
+        ram_bytes = 8 * 1024**3
+    return HardwareProfile(cpu_cores=cpu_cores, ram_bytes=ram_bytes)
+
+
+def choose_optimal_preset_tier(profile: HardwareProfile) -> str:
+    """Classify the machine for defaults that avoid high background CPU."""
+
+    ram_gb = profile.ram_bytes / 1024**3
+    if profile.cpu_cores <= 4 or ram_gb <= 8:
+        return "low"
+    if profile.cpu_cores >= 8 and ram_gb >= 24:
+        return "high"
+    return "balanced"
+
+
+def apply_optimal_preset(config: AppConfig, profile: HardwareProfile | None = None) -> AppConfig:
+    """Apply a conservative out-of-box preset while keeping destructive actions off."""
+
+    profile = profile or detect_hardware_profile()
+    tier = choose_optimal_preset_tier(profile)
+    config.optimal_preset_tier = tier
+    config.optimal_preset_applied = True
+    config.automation_mode = "autopilot"
+    config.observation_only_mode = False
+    config.auto_close_mode = "off"
+    config.auto_lower_priority_enabled = True
+    config.cpu_optimizer_enabled = True
+    config.cpu_throttle_enabled = True
+    config.cpu_throttle_affinity_enabled = True
+    config.cpu_limiter_enabled = False
+    config.ram_auto_clean_enabled = True
+    config.sleep_enabled = True
+    config.scheduled_cleanup_enabled = True
+    config.scheduled_cleanup_notify = True
+    config.periodic_optimization_enabled = True
+    config.periodic_optimization_eco_mode = True
+    config.periodic_optimization_notify = True
+    config.cleanup_recycle_bin_enabled = False
+    config.cleanup_prefetch_enabled = False
+
+    config.cpu_threshold_percent = 85.0
+    config.cpu_sustain_seconds = 3.0
+    config.ram_threshold_percent = 80.0
+    config.ram_auto_clean_threshold_percent = 80.0
+    config.sleep_after_minutes = 15.0
+    config.scheduled_cleanup_interval_minutes = 15.0
+    config.periodic_optimization_interval_minutes = 15.0
+    config.auto_cleanup_cooldown_minutes = 5.0
+
+    if tier == "low":
+        config.lite_mode_enabled = True
+        config.monitor_interval_seconds = 3.5
+        config.process_refresh_seconds = 12.0
+        config.cpu_optimizer_max_processes = 2
+        config.cpu_threshold_percent = 90.0
+        config.ram_auto_clean_threshold_percent = 85.0
+        config.scheduled_cleanup_interval_minutes = 20.0
+        config.periodic_optimization_interval_minutes = 20.0
+    elif tier == "high":
+        config.lite_mode_enabled = False
+        config.monitor_interval_seconds = 2.5
+        config.process_refresh_seconds = 6.0
+        config.cpu_optimizer_max_processes = 4
+        config.sleep_after_minutes = 12.0
+    else:
+        config.lite_mode_enabled = False
+        config.monitor_interval_seconds = 3.0
+        config.process_refresh_seconds = 6.0
+        config.cpu_optimizer_max_processes = 3
+
+    return apply_automation_mode(sanitize_config(config))
 
 
 def load_config(path: Path | None = None) -> AppConfig:
@@ -260,7 +359,7 @@ def load_config(path: Path | None = None) -> AppConfig:
 
     config_path = path or get_config_path()
     if not config_path.exists():
-        return apply_automation_mode(sanitize_config(AppConfig()))
+        return apply_optimal_preset(AppConfig())
 
     try:
         data: dict[str, Any] = json.loads(config_path.read_text(encoding="utf-8"))
@@ -323,6 +422,10 @@ def _migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
         migrated.setdefault("cleanup_logs_older_than_days", 7)
         migrated.setdefault("cleanup_recycle_bin_enabled", False)
         migrated["config_version"] = 6
+    if version < 7:
+        migrated.setdefault("optimal_preset_tier", "balanced")
+        migrated.setdefault("optimal_preset_applied", False)
+        migrated["config_version"] = 7
     return migrated
 
 

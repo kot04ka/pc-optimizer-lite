@@ -29,7 +29,12 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Name: "autostart"; Description: "Start PC Optimizer Lite with Windows (tray mode)"; GroupDescription: "Startup:"; Flags: unchecked
 
 [Files]
-Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[InstallDelete]
+Type: files; Name: "{app}\PC Optimizer Lite_new.exe"
+Type: files; Name: "{app}\apply_pc_optimizer_lite_update.ps1"
+Type: files; Name: "{app}\pc_optimizer_lite_update.log"
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"

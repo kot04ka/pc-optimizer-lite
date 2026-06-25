@@ -51,6 +51,7 @@ from .config import (
     DEFAULT_UPDATE_CHECK_INTERVAL_HOURS,
     AppConfig,
     apply_automation_mode,
+    apply_optimal_preset,
     save_config,
 )
 from .cpu_optimizer import CpuOptimizer
@@ -60,6 +61,13 @@ from .monitor import MonitorSnapshot, ProcessInfo, SystemMonitor, format_bytes
 from .notifier import SystemNotifier
 from .optimize_action import OptimizationResult, run_full_optimization, undo_optimization
 from .optimizer import CleanupPlan, SystemOptimizer, open_file_location
+from .pagefile import (
+    PageFileAdvice,
+    PageFileStatus,
+    get_windows_pagefile_auto_managed,
+    recommend_pagefile_action,
+    set_windows_auto_pagefile,
+)
 from .ram_cleaner import MEMORY_PURGE_STANDBY_LIST, RamCleanMode, RamCleaner, RamCleanResult, is_admin, purge_memory_list
 from .sleep_manager import SleepAction, SleepManager
 from .smart_process_manager import CloseCandidate, SmartProcessManager
@@ -727,6 +735,8 @@ class PCOptimizerQtWindow(QMainWindow):
         self._pending_update: UpdateCheckResult | None = None
         self._update_action_mode = "check"
         self._syncing_controls = False
+        self._pagefile_auto_managed: bool | None = None
+        self._last_pagefile_advice: PageFileAdvice | None = None
 
         self.setWindowTitle("PC Optimizer Lite")
         self.resize(1160, 760)
@@ -889,6 +899,32 @@ class PCOptimizerQtWindow(QMainWindow):
         self.metric_cards = (self.cpu_card, self.ram_card, self.disk_card, self.swap_card)
         layout.addLayout(self.card_grid)
         self._arrange_metric_cards()
+
+        self.pagefile_panel = QFrame()
+        self.pagefile_panel.setObjectName("InlinePanel")
+        pagefile_layout = QHBoxLayout(self.pagefile_panel)
+        pagefile_layout.setContentsMargins(14, 10, 14, 10)
+        pagefile_layout.setSpacing(10)
+        self.pagefile_advice_label = QLabel("Файл подкачки: анализ появится после первого снимка системы.")
+        self.pagefile_advice_label.setWordWrap(True)
+        self.pagefile_advice_label.setObjectName("SettingsHint")
+        self.pagefile_apply_button = _button(
+            "Применить рекомендацию",
+            "play",
+            self.apply_pagefile_recommendation,
+            self.palette,
+        )
+        self.pagefile_apply_button.setVisible(False)
+        self.pagefile_reset_button = _button(
+            "Вернуть Windows по умолчанию",
+            "refresh",
+            self.reset_pagefile_to_windows_defaults,
+            self.palette,
+        )
+        pagefile_layout.addWidget(self.pagefile_advice_label, 1)
+        pagefile_layout.addWidget(self.pagefile_apply_button)
+        pagefile_layout.addWidget(self.pagefile_reset_button)
+        layout.addWidget(self.pagefile_panel)
 
         self.graph = HistoryGraphWidget(self.palette)
         self.graph_section = CollapsibleSection("График CPU/RAM", self.palette, self.config.graph_collapsed)
@@ -1156,6 +1192,12 @@ class PCOptimizerQtWindow(QMainWindow):
         self.check_updates_button = _button("Проверить обновления", "refresh", self.check_updates_now, self.palette)
         self.check_updates_button.setObjectName("UpdateActionButton")
         self.check_updates_button.setProperty("updateAvailable", False)
+        self.reset_optimal_button = _button(
+            "Сбросить к оптимальным настройкам",
+            "refresh",
+            self.reset_to_optimal_settings,
+            self.palette,
+        )
         self._preview_automation_mode()
 
         monitoring_section, monitoring_form = _settings_section("Мониторинг", self.palette)
@@ -1164,6 +1206,7 @@ class PCOptimizerQtWindow(QMainWindow):
         _form_row(monitoring_form, "", self.observation_only_check)
         _form_row(monitoring_form, "", self.autostart_check)
         _form_row(monitoring_form, "", self.lite_mode_check)
+        _form_row(monitoring_form, "", self.reset_optimal_button)
         _form_row(monitoring_form, "Интервал мониторинга, сек", self.interval_edit)
         _form_row(monitoring_form, "Интервал обновления процессов, сек", self.process_interval_edit)
         content_layout.addWidget(monitoring_section)
@@ -1331,7 +1374,7 @@ class PCOptimizerQtWindow(QMainWindow):
             self.periodic_optimization_check.setChecked(True)
             self.periodic_eco_check.setChecked(True)
             self.periodic_notify_check.setChecked(True)
-            self.auto_close_combo.setCurrentIndex(2)
+            self.auto_close_combo.setCurrentIndex(0)
 
     def _preview_lite_mode_defaults(self, enabled: bool) -> None:
         if not enabled or self._syncing_controls:
@@ -1346,6 +1389,47 @@ class PCOptimizerQtWindow(QMainWindow):
             checkbox = self.optimization_step_checks.get(key)
             if checkbox is not None:
                 checkbox.setChecked(False)
+
+    def reset_to_optimal_settings(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Оптимальные настройки",
+            (
+                "Вернуть сбалансированный пресет для этого ПК?\n\n"
+                "Будут включены безопасные авто-действия: RAM/temp очистка, мягкая CPU-защита и сон окон. "
+                "Авто-закрытие процессов останется выключенным."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        theme = self.config.theme
+        whitelist_names = list(self.config.user_whitelist_names)
+        whitelist_paths = list(self.config.user_whitelist_paths)
+        autostart_enabled = self.autostart_check.isChecked()
+        apply_optimal_preset(self.config)
+        self.config.theme = theme
+        self.config.user_whitelist_names = whitelist_names
+        self.config.user_whitelist_paths = whitelist_paths
+        self.config.autopilot_consent_accepted = True
+        save_config(self.config)
+        self._sync_controls_from_config()
+        self.autostart_check.setChecked(autostart_enabled)
+        self.notifier.cooldown_seconds = self.config.notification_cooldown_seconds
+        self.monitor.interval_seconds = self.config.monitor_interval_seconds
+        self.monitor.process_refresh_seconds = self.config.process_refresh_seconds
+        self._foreground_monitor_interval = self.config.monitor_interval_seconds
+        self._foreground_process_interval = self.config.process_refresh_seconds
+        self._apply_runtime_performance_mode()
+        self.history.add_event(
+            "settings",
+            "Optimal preset applied",
+            f"Tier: {self.config.optimal_preset_tier}; auto-close remains off.",
+            "success",
+        )
+        QMessageBox.information(self, "Оптимальные настройки", "Пресет применён и сохранён.")
+        self.refresh_activity()
 
     def _sync_controls_from_config(self) -> None:
         self._syncing_controls = True
@@ -1408,8 +1492,8 @@ class PCOptimizerQtWindow(QMainWindow):
         box.setText("Автопилот будет сам выполнять безопасные действия в фоне.")
         box.setInformativeText(
             "PC Optimizer Lite сможет без отдельных подтверждений усыплять неактивные приложения, "
-            "понижать priority, выполнять лёгкую автоочистку RAM/temp/cache, включать CPU throttling и закрывать "
-            "только консервативно выбранные фоновые процессы вне whitelist. Во время автопилота будут только toast-уведомления "
+            "понижать priority, выполнять лёгкую автоочистку RAM/temp/cache и включать CPU throttling. "
+            "Авто-закрытие процессов остаётся выключенным, пока вы не включите его отдельно. Во время автопилота будут только toast-уведомления "
             "и записи в историю."
         )
         checkbox = QCheckBox("Понимаю и согласен")
@@ -1467,6 +1551,7 @@ class PCOptimizerQtWindow(QMainWindow):
                 f"Page File: {format_bytes(snapshot.swap.used)} / {format_bytes(snapshot.swap.total)} ({snapshot.swap.percent:.0f}%)",
                 snapshot.swap.percent,
             )
+            self._update_pagefile_advice(snapshot)
             max_disk = max((disk.percent for disk in snapshot.disks), default=0.0)
             self.disk_card.set_metric(
                 f"{max_disk:.1f}%",
@@ -1491,6 +1576,92 @@ class PCOptimizerQtWindow(QMainWindow):
             self._maybe_smart_close(snapshot)
             self._maybe_scheduled_auto_cleanup(snapshot)
             self._maybe_periodic_optimization(snapshot)
+
+    def _update_pagefile_advice(self, snapshot: MonitorSnapshot) -> None:
+        if self._pagefile_auto_managed is None:
+            try:
+                self._pagefile_auto_managed = get_windows_pagefile_auto_managed()
+            except Exception:
+                self._pagefile_auto_managed = None
+        status = PageFileStatus(
+            total_ram_bytes=snapshot.memory.total,
+            pagefile_total_bytes=snapshot.swap.total,
+            pagefile_used_bytes=snapshot.swap.used,
+            pagefile_percent=snapshot.swap.percent,
+            automatic_managed=self._pagefile_auto_managed,
+        )
+        advice = recommend_pagefile_action(status)
+        self._last_pagefile_advice = advice
+        auto_text = (
+            "Windows auto"
+            if status.automatic_managed is True
+            else "ручной режим"
+            if status.automatic_managed is False
+            else "режим неизвестен"
+        )
+        self.pagefile_advice_label.setText(
+            f"{advice.title}. {advice.detail} "
+            f"Текущее использование: {format_bytes(status.pagefile_used_bytes)} / "
+            f"{format_bytes(status.pagefile_total_bytes)} ({status.pagefile_percent:.0f}%), {auto_text}."
+        )
+        self.pagefile_apply_button.setVisible(advice.action != "none")
+
+    def apply_pagefile_recommendation(self) -> None:
+        advice = self._last_pagefile_advice
+        if advice is None or advice.action == "none":
+            QMessageBox.information(self, "Файл подкачки", "Сейчас нет рекомендации для применения.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Файл подкачки",
+            (
+                f"{advice.title}\n\n{advice.detail}\n\n"
+                "Изменение требует прав администратора и может вступить в силу только после перезагрузки. "
+                "Продолжить?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._set_windows_auto_pagefile_from_ui("Page file recommendation applied")
+
+    def reset_pagefile_to_windows_defaults(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Файл подкачки",
+            (
+                "Вернуть файл подкачки к настройке Windows по умолчанию: автоматическое управление размером?\n\n"
+                "Нужны права администратора. Изменение может потребовать перезагрузку."
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._set_windows_auto_pagefile_from_ui("Page file reset to Windows defaults")
+
+    def _set_windows_auto_pagefile_from_ui(self, history_title: str) -> None:
+        try:
+            set_windows_auto_pagefile()
+        except PermissionError:
+            QMessageBox.warning(
+                self,
+                "Файл подкачки",
+                "Нужны права администратора. Запустите приложение от имени администратора и повторите действие.",
+            )
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Файл подкачки", f"Не удалось изменить настройку:\n{exc}")
+            return
+        self._pagefile_auto_managed = True
+        self.history.add_event("settings", history_title, "Windows automatic page-file management enabled.", "success")
+        QMessageBox.information(
+            self,
+            "Файл подкачки",
+            "Включено автоматическое управление Windows. Если система попросит, перезагрузите ПК.",
+        )
+        self.refresh_activity()
 
     def start_full_optimization(self) -> None:
         """Start one-click optimization in a Qt worker thread."""
@@ -2993,7 +3164,7 @@ def _qss(palette: dict[str, str]) -> str:
         border: 1px solid {palette["border"]};
         border-radius: 10px;
     }}
-    QFrame#MetricCard, QFrame#SettingsSection, QFrame#CollapsibleSection {{
+    QFrame#MetricCard, QFrame#SettingsSection, QFrame#CollapsibleSection, QFrame#InlinePanel {{
         background: {palette["panel"]};
         border: 1px solid {palette["border"]};
         border-radius: 12px;

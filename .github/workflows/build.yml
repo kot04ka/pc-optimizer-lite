@@ -29,8 +29,26 @@ jobs:
         shell: powershell
         run: |
           $portable = "dist\PC Optimizer Lite.exe"
-          $hash = (Get-FileHash -LiteralPath $portable -Algorithm SHA256).Hash.ToLowerInvariant()
-          "Automated build for $env:GITHUB_REF_NAME`n`nsha256: $hash" | Set-Content -LiteralPath RELEASE_NOTES.md -Encoding UTF8
+          $setup = "installer_output\PC-Optimizer-Lite-Setup.exe"
+          $portableHash = (Get-FileHash -LiteralPath $portable -Algorithm SHA256).Hash.ToLowerInvariant()
+          $setupHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          $notes = @(
+            "Hot-fix: исправлена ошибка загрузки после обновления (`Failed to load Python DLL ... _MEI...\python312.dll`).",
+            "",
+            "Что изменено:",
+            "- Апдейтер дожидается полного закрытия старого процесса по PID, использует timeout и retry при Windows file lock.",
+            "- Старый exe заменяется только после проверки размера/sha256 скачанного asset и успешного Move-Item.",
+            "- Установщик использует onedir-сборку приложения, чтобы установленная версия не распаковывалась в %TEMP%\_MEI при каждом запуске.",
+            "",
+            "Если приложение уже не запускается с ошибкой python312.dll:",
+            "скачайте PC-Optimizer-Lite-Setup.exe из этого релиза и установите поверх старой версии вручную.",
+            "",
+            "PC-Optimizer-Lite.exe sha256: $portableHash",
+            "PC.Optimizer.Lite.exe sha256: $portableHash",
+            "PC Optimizer Lite.exe sha256: $portableHash",
+            "PC-Optimizer-Lite-Setup.exe sha256: $setupHash"
+          ) -join [Environment]::NewLine
+          $notes | Set-Content -LiteralPath RELEASE_NOTES.md -Encoding UTF8
 
       - name: Publish GitHub Release
         shell: powershell
