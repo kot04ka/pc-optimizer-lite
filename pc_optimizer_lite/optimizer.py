@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from .config import AppConfig
+from .process_safety import get_foreground_pid, is_interactive_process
 from .whitelist import Whitelist
 
 try:
@@ -114,6 +115,7 @@ class SystemOptimizer:
         cpu_percent: float = 20.0,
         memory_percent: float = 10.0,
         limit: int = 10,
+        foreground_pid: int | None = None,
     ) -> list["ProcessInfo"]:
         """Return non-whitelisted resource-heavy processes."""
 
@@ -122,6 +124,13 @@ class SystemOptimizer:
             for process in processes
             if process.pid != self._own_pid
             and not self.whitelist.is_whitelisted(process.name, process.exe)
+            and not is_interactive_process(
+                pid=process.pid,
+                name=process.name,
+                has_window=bool(getattr(process, "has_window", False)),
+                is_foreground_related=bool(getattr(process, "is_foreground_related", False)),
+                foreground_pid=foreground_pid,
+            )
             and (process.cpu_percent >= cpu_percent or process.memory_percent >= memory_percent)
         ]
         return sorted(suggestions, key=lambda item: (item.cpu_percent, item.memory_percent), reverse=True)[
@@ -142,6 +151,14 @@ class SystemOptimizer:
                 return OptimizerAction(pid, name, "lower_priority", False, "Application process is protected")
             if self.whitelist.is_whitelisted(name, exe):
                 return OptimizerAction(pid, name, "lower_priority", False, "Process is whitelisted")
+            if is_interactive_process(pid=pid, name=name):
+                return OptimizerAction(
+                    pid,
+                    name,
+                    "lower_priority",
+                    False,
+                    "Process is active or interactive; priority was not changed",
+                )
 
             if os.name == "nt":
                 proc.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
@@ -168,7 +185,8 @@ class SystemOptimizer:
         """Lower priority for the top heavy non-whitelisted processes."""
 
         actions: list[OptimizerAction] = []
-        for process in self.suggest_heavy_processes(processes, limit=limit):
+        foreground_pid = get_foreground_pid()
+        for process in self.suggest_heavy_processes(processes, limit=limit, foreground_pid=foreground_pid):
             actions.append(self.lower_priority_for_process(process.pid))
         return actions
 

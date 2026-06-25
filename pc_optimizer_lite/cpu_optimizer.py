@@ -19,6 +19,7 @@ import psutil
 
 from .config import AppConfig
 from .history_manager import HistoryManager
+from .process_safety import is_interactive_process
 from .whitelist import Whitelist
 
 LOGGER = logging.getLogger(__name__)
@@ -140,10 +141,26 @@ class CpuOptimizer:
 
         return [self._restore_record(record, reason) for record in list(self._records.values())]
 
+    def restore_interactive(self, reason: str = "interactive app focused") -> list[CpuOptimizationChange]:
+        """Restore optimized processes that are now active or otherwise interactive."""
+
+        changes: list[CpuOptimizationChange] = []
+        for record in list(self._records.values()):
+            if is_interactive_process(pid=record.pid, name=record.name):
+                changes.append(self._restore_record(record, reason))
+        return changes
+
     def _is_candidate(self, item: CpuSnapshot, config: AppConfig) -> bool:
         if item.pid == self._own_pid or item.pid in self._records:
             return False
         if item.cpu_percent < config.cpu_optimizer_min_process_cpu_percent:
+            return False
+        if is_interactive_process(
+            pid=item.pid,
+            name=item.name,
+            has_window=item.has_window,
+            is_foreground_related=item.is_foreground_related,
+        ):
             return False
         if item.is_foreground_related or item.active_audio_hint or item.active_network:
             return False
@@ -157,6 +174,13 @@ class CpuOptimizer:
         try:
             proc = item.proc or psutil.Process(item.pid)
             if self.whitelist.is_whitelisted(item.name, item.exe):
+                return None
+            if is_interactive_process(
+                pid=item.pid,
+                name=item.name,
+                has_window=item.has_window,
+                is_foreground_related=item.is_foreground_related,
+            ):
                 return None
             previous_priority = item.priority if item.priority is not None else _safe_nice(proc)
             previous_affinity = _safe_affinity(proc)

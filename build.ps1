@@ -139,6 +139,7 @@ function Build-PyInstallerInstaller {
         --hidden-import pc_optimizer_lite.history_manager `
         --hidden-import pc_optimizer_lite.optimize_action `
         --hidden-import pc_optimizer_lite.pagefile `
+        --hidden-import pc_optimizer_lite.process_safety `
         --hidden-import pc_optimizer_lite.ram_cleaner `
         --hidden-import pc_optimizer_lite.sleep_manager `
         --hidden-import pc_optimizer_lite.updater `

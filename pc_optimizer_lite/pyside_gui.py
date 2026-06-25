@@ -76,6 +76,9 @@ from .version import APP_VERSION
 from .whitelist import Whitelist
 
 LOGGER = logging.getLogger(__name__)
+STARTUP_MONITOR_DELAY_MS = 1200
+STARTUP_LITE_PROMPT_DELAY_MS = 2500
+STARTUP_UPDATE_CHECK_DELAY_MS = 8000
 
 
 THEMES = {
@@ -751,8 +754,8 @@ class PCOptimizerQtWindow(QMainWindow):
         self.activity_timer.timeout.connect(self.refresh_activity)
         self.activity_timer.start(15000)
         self._apply_runtime_performance_mode()
-        QTimer.singleShot(900, self._maybe_offer_lite_mode)
-        QTimer.singleShot(2200, self._maybe_check_updates_on_startup)
+        QTimer.singleShot(STARTUP_LITE_PROMPT_DELAY_MS, self._maybe_offer_lite_mode)
+        QTimer.singleShot(STARTUP_UPDATE_CHECK_DELAY_MS, self._maybe_check_updates_on_startup)
 
     def resizeEvent(self, event: object) -> None:
         super().resizeEvent(event)
@@ -1569,6 +1572,10 @@ class PCOptimizerQtWindow(QMainWindow):
             if wake_actions:
                 for action in wake_actions:
                     self._log_sleep_action(action)
+                self.refresh_activity()
+            cpu_restored = self.cpu_optimizer.restore_interactive()
+            throttle_restored = self.cpu_throttler.restore_interactive()
+            if cpu_restored or throttle_restored:
                 self.refresh_activity()
             self._maybe_poll_sleep_manager()
             self._maybe_cpu_throttle(snapshot)
@@ -2958,6 +2965,7 @@ def run_app(config: AppConfig) -> int:
     monitor = SystemMonitor(
         interval_seconds=config.monitor_interval_seconds,
         process_refresh_seconds=config.process_refresh_seconds,
+        startup_grace_seconds=8.0,
     )
     optimizer = SystemOptimizer(whitelist, config)
     notifier = SystemNotifier(cooldown_seconds=config.notification_cooldown_seconds)
@@ -2984,7 +2992,7 @@ def run_app(config: AppConfig) -> int:
     app.aboutToQuit.connect(cpu_optimizer.restore_all)
     if config.window_starts_hidden:
         window._enter_background_mode()
-    monitor.start()
+    QTimer.singleShot(STARTUP_MONITOR_DELAY_MS, monitor.start)
     if not config.window_starts_hidden:
         window.show()
     return int(app.exec())

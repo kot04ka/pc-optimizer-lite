@@ -20,7 +20,7 @@ from pc_optimizer_lite.config import (
 from pc_optimizer_lite.cpu_optimizer import CpuOptimizer
 from pc_optimizer_lite.cpu_throttler import CpuThrottler
 from pc_optimizer_lite.history_manager import HistoryManager
-from pc_optimizer_lite.monitor import DiskIOInfo, MemoryInfo, MonitorSnapshot, ProcessInfo, SwapInfo
+from pc_optimizer_lite.monitor import DiskIOInfo, MemoryInfo, MonitorSnapshot, ProcessInfo, SwapInfo, SystemMonitor
 from pc_optimizer_lite.optimize_action import ProcessOptimizationSnapshot, _classify_processes, _step_enabled
 from pc_optimizer_lite.optimizer import CleanupTarget, SystemOptimizer
 from pc_optimizer_lite.pagefile import (
@@ -425,6 +425,110 @@ class SmartProcessTests(unittest.TestCase):
             self.assertEqual(candidates, [])
 
 
+class SystemOptimizerInputGuardTests(unittest.TestCase):
+    def test_foreground_process_table_entry_is_not_priority_candidate(self) -> None:
+        config = AppConfig()
+        optimizer = SystemOptimizer(Whitelist(config), config)
+        foreground = ProcessInfo(
+            pid=4001,
+            name="Telegram.exe",
+            exe=r"C:\Users\User\AppData\Roaming\Telegram Desktop\Telegram.exe",
+            username="",
+            status="running",
+            cpu_percent=95.0,
+            memory_percent=3.0,
+            memory_rss=1024,
+            priority="normal",
+            has_window=True,
+            is_foreground_related=True,
+        )
+        worker = ProcessInfo(
+            pid=4002,
+            name="worker.exe",
+            exe=r"C:\Apps\worker.exe",
+            username="",
+            status="running",
+            cpu_percent=80.0,
+            memory_percent=3.0,
+            memory_rss=1024,
+            priority="normal",
+            has_window=False,
+            is_foreground_related=False,
+        )
+
+        candidates = optimizer.suggest_heavy_processes([foreground, worker], cpu_percent=20.0, limit=5)
+
+        self.assertEqual([item.pid for item in candidates], [4002])
+
+    def test_lower_priority_refuses_foreground_related_process(self) -> None:
+        import pc_optimizer_lite.optimizer as optimizer_module
+
+        class FakeProcess:
+            pid = 5001
+
+            def __init__(self, pid: int) -> None:
+                self.pid = pid
+                self.nice_calls: list[int] = []
+
+            def name(self) -> str:
+                return "Discord.exe"
+
+            def exe(self) -> str:
+                return r"C:\Users\User\AppData\Local\Discord\Discord.exe"
+
+            def nice(self, value: int | None = None) -> int:
+                if value is not None:
+                    self.nice_calls.append(value)
+                return 0
+
+        class FakePsutil:
+            BELOW_NORMAL_PRIORITY_CLASS = 0x4000
+            AccessDenied = Exception
+            NoSuchProcess = Exception
+            ZombieProcess = Exception
+
+            def __init__(self) -> None:
+                self.proc = FakeProcess(5001)
+
+            def Process(self, pid: int) -> FakeProcess:  # noqa: N802 - psutil-style API
+                self.proc.pid = pid
+                return self.proc
+
+        fake_psutil = FakePsutil()
+        original_psutil = optimizer_module.psutil
+        original_get_foreground_pid = getattr(optimizer_module, "get_foreground_pid", None)
+        original_is_related_to_pid = getattr(optimizer_module, "is_related_to_pid", None)
+        optimizer_module.psutil = fake_psutil  # type: ignore[assignment]
+        optimizer_module.get_foreground_pid = lambda: 5001  # type: ignore[attr-defined]
+        optimizer_module.is_related_to_pid = lambda pid, active_pid: pid == active_pid  # type: ignore[attr-defined]
+        try:
+            action = SystemOptimizer(Whitelist(AppConfig())).lower_priority_for_process(5001)
+        finally:
+            optimizer_module.psutil = original_psutil  # type: ignore[assignment]
+            if original_get_foreground_pid is None:
+                delattr(optimizer_module, "get_foreground_pid")
+            else:
+                optimizer_module.get_foreground_pid = original_get_foreground_pid  # type: ignore[attr-defined]
+            if original_is_related_to_pid is None:
+                delattr(optimizer_module, "is_related_to_pid")
+            else:
+                optimizer_module.is_related_to_pid = original_is_related_to_pid  # type: ignore[attr-defined]
+
+        self.assertFalse(action.success)
+        self.assertIn("active", action.message.lower())
+        self.assertEqual(fake_psutil.proc.nice_calls, [])
+
+
+class SystemMonitorStartupTests(unittest.TestCase):
+    def test_startup_grace_defers_first_process_collection(self) -> None:
+        monitor = SystemMonitor(interval_seconds=2.0, process_refresh_seconds=2.0, startup_grace_seconds=5.0)
+        monitor.set_process_collection_enabled(True)
+        monitor._started_at = 100.0  # noqa: SLF001
+        monitor._last_process_refresh = 0.0  # noqa: SLF001
+        self.assertFalse(monitor._should_collect_processes(now=103.0))  # noqa: SLF001
+        self.assertTrue(monitor._should_collect_processes(now=106.0))  # noqa: SLF001
+
+
 class OneClickOptimizationTests(unittest.TestCase):
     def test_optimization_step_flag_disables_step(self) -> None:
         config = AppConfig(optimize_step_cleanup_enabled=False)
@@ -531,6 +635,56 @@ class CpuThrottlerTests(unittest.TestCase):
             candidates = throttler.select_candidates([protected, worker])
             self.assertEqual([item.name for item in candidates], ["worker.exe"])
 
+    def test_foreground_and_windowed_processes_are_not_throttle_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = AppConfig()
+            whitelist = Whitelist(config)
+            history = HistoryManager(path=Path(tmp) / "history.json")
+            throttler = CpuThrottler(whitelist, history)
+            active_messenger = ProcessInfo(
+                pid=777101,
+                name="Discord.exe",
+                exe=r"C:\Users\User\AppData\Local\Discord\Discord.exe",
+                username="",
+                status="running",
+                cpu_percent=99.0,
+                memory_percent=5.0,
+                memory_rss=1,
+                priority="normal",
+                has_window=True,
+                is_foreground_related=True,
+            )
+            background_window = ProcessInfo(
+                pid=777102,
+                name="Telegram.exe",
+                exe=r"C:\Users\User\AppData\Roaming\Telegram Desktop\Telegram.exe",
+                username="",
+                status="running",
+                cpu_percent=88.0,
+                memory_percent=5.0,
+                memory_rss=1,
+                priority="normal",
+                has_window=True,
+                is_foreground_related=False,
+            )
+            worker = ProcessInfo(
+                pid=777103,
+                name="worker.exe",
+                exe=r"C:\Apps\worker.exe",
+                username="",
+                status="running",
+                cpu_percent=70.0,
+                memory_percent=5.0,
+                memory_rss=1,
+                priority="normal",
+                has_window=False,
+                is_foreground_related=False,
+            )
+
+            candidates = throttler.select_candidates([active_messenger, background_window, worker])
+
+            self.assertEqual([item.pid for item in candidates], [777103])
+
 
 class CpuOptimizerTests(unittest.TestCase):
     def test_whitelist_is_not_snapshot_cpu_candidate(self) -> None:
@@ -575,6 +729,32 @@ class CpuOptimizerTests(unittest.TestCase):
             )
             self.assertFalse(optimizer._is_candidate(protected, config))  # noqa: SLF001
             self.assertTrue(optimizer._is_candidate(worker, config))  # noqa: SLF001
+
+    def test_windowed_interactive_snapshot_is_not_cpu_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = AppConfig()
+            whitelist = Whitelist(config)
+            history = HistoryManager(path=Path(tmp) / "history.json")
+            optimizer = CpuOptimizer(whitelist, history)
+            telegram = ProcessOptimizationSnapshot(
+                pid=2001,
+                name="Telegram.exe",
+                exe=r"C:\Users\User\AppData\Roaming\Telegram Desktop\Telegram.exe",
+                username="",
+                cpu_percent=99.0,
+                memory_percent=1.0,
+                rss=1,
+                priority=None,
+                has_window=True,
+                is_foreground_related=False,
+                active_network=False,
+                active_audio_hint=False,
+                hung_window=False,
+                age_seconds=100.0,
+                last_focus_age_seconds=600.0,
+            )
+
+            self.assertFalse(optimizer._is_candidate(telegram, config))  # noqa: SLF001
 
 
 if __name__ == "__main__":

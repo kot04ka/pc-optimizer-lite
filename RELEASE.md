@@ -11,7 +11,7 @@ pc_optimizer_lite/version.py
 Set:
 
 ```python
-APP_VERSION = "1.3.4"
+APP_VERSION = "1.3.5"
 ```
 
 Keep `pyproject.toml` in sync for package metadata.
@@ -36,8 +36,8 @@ installer_output\PC-Optimizer-Lite-Setup.exe
 Create a tag matching the version:
 
 ```powershell
-git tag v1.3.4
-git push origin v1.3.4
+git tag v1.3.5
+git push origin v1.3.5
 ```
 
 Then create a GitHub Release for that tag and attach these assets:
@@ -50,7 +50,7 @@ installer_output\PC-Optimizer-Lite-Setup.exe
 Recommended release notes:
 
 ```text
-Hot-fix: исправлена ошибка загрузки после обновления.
+Hot-fix: Исправлена задержка ввода в Telegram, Discord и других интерактивных приложениях при работе оптимизатора.
 
 PC-Optimizer-Lite.exe sha256: <SHA256 of dist\PC Optimizer Lite.exe>
 PC-Optimizer-Lite-Setup.exe sha256: <SHA256 of installer_output\PC-Optimizer-Lite-Setup.exe>
@@ -60,7 +60,7 @@ The updater prefers the portable exe asset and uses the release tag for semver c
 
 ## 4. Automatic Build From Tags
 
-The workflow in `.github/workflows/build.yml` builds and uploads release assets automatically when a tag like `v1.3.4` is pushed.
+The workflow in `.github/workflows/build.yml` builds and uploads release assets automatically when a tag like `v1.3.5` is pushed.
 
 The app checks:
 
