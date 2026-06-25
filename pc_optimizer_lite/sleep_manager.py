@@ -18,7 +18,6 @@ LOGGER = logging.getLogger(__name__)
 SKIP_SLEEP_NAMES = {
     "audiodg.exe",
     "discord.exe",
-    "msedge.exe",
     "onedrive.exe",
     "obs64.exe",
     "spotify.exe",
@@ -45,6 +44,19 @@ class SleepEntry:
 
 
 @dataclass(slots=True)
+class AppUsageStats:
+    """Observed foreground usage for one windowed process."""
+
+    pid: int
+    name: str = ""
+    exe: str = ""
+    focus_count: int = 0
+    total_focus_seconds: float = 0.0
+    last_focused_at: float = 0.0
+    current_focus_started_at: float | None = None
+
+
+@dataclass(slots=True)
 class SleepAction:
     """Result of sleep/resume work."""
 
@@ -65,12 +77,28 @@ class SleepManager:
         self._last_focus_by_pid: dict[int, float] = {}
         self._sleeping: dict[int, SleepEntry] = {}
         self._last_io_by_pid: dict[int, tuple[int, int]] = {}
+        self._usage_stats: dict[int, AppUsageStats] = {}
+        self._foreground_pid: int | None = None
 
     @property
     def sleeping(self) -> list[SleepEntry]:
         """Return sleeping processes newest first."""
 
         return sorted(self._sleeping.values(), key=lambda entry: entry.slept_at, reverse=True)
+
+    @property
+    def usage_stats(self) -> dict[int, AppUsageStats]:
+        """Return foreground usage counters keyed by pid."""
+
+        return self._usage_stats
+
+    def resume_foreground_if_sleeping(self) -> list[SleepAction]:
+        """Resume a suspended app as soon as Windows reports it as foreground."""
+
+        foreground_pid = get_foreground_pid()
+        if foreground_pid and foreground_pid in self._sleeping:
+            return [self.resume_process(foreground_pid, "foreground")]
+        return []
 
     def poll(self, enabled: bool, idle_minutes: float, max_actions: int = 2) -> list[SleepAction]:
         """Update focus state, resume focused apps, and sleep eligible inactive apps."""
@@ -79,8 +107,10 @@ class SleepManager:
         foreground_pid = get_foreground_pid()
         visible_pids = get_visible_window_pids()
         actions: list[SleepAction] = []
+        self._record_focus_transition(foreground_pid, now)
 
         if foreground_pid:
+            self._update_usage_metadata(foreground_pid)
             self._last_focus_by_pid[foreground_pid] = now
             if foreground_pid in self._sleeping:
                 actions.append(self.resume_process(foreground_pid, "foreground"))
@@ -98,6 +128,8 @@ class SleepManager:
                 continue
             last_focus = self._last_focus_by_pid.get(pid, now)
             if now - last_focus < idle_minutes * 60.0:
+                continue
+            if self._is_recently_reused(pid, now, idle_minutes):
                 continue
             action = self.sleep_process(pid, f"Inactive for {idle_minutes:.0f}+ min")
             if action:
@@ -223,6 +255,41 @@ class SleepManager:
         if self._has_active_io(proc):
             return False
         return True
+
+    def _record_focus_transition(self, foreground_pid: int | None, now: float) -> None:
+        if foreground_pid == self._foreground_pid:
+            return
+        previous_pid = self._foreground_pid
+        if previous_pid is not None:
+            previous_stats = self._usage_stats.get(previous_pid)
+            if previous_stats and previous_stats.current_focus_started_at is not None:
+                previous_stats.total_focus_seconds += max(0.0, now - previous_stats.current_focus_started_at)
+                previous_stats.current_focus_started_at = None
+        self._foreground_pid = foreground_pid
+        if foreground_pid is None:
+            return
+        stats = self._usage_stats.setdefault(foreground_pid, AppUsageStats(pid=foreground_pid))
+        stats.focus_count += 1
+        stats.last_focused_at = now
+        stats.current_focus_started_at = now
+
+    def _update_usage_metadata(self, pid: int) -> None:
+        stats = self._usage_stats.setdefault(pid, AppUsageStats(pid=pid))
+        if stats.name and stats.exe:
+            return
+        try:
+            proc = psutil.Process(pid)
+            stats.name = proc.name()
+            stats.exe = _safe_exe(proc)
+        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+            return
+
+    def _is_recently_reused(self, pid: int, now: float, idle_minutes: float) -> bool:
+        stats = self._usage_stats.get(pid)
+        if stats is None or stats.focus_count < 3:
+            return False
+        reuse_window_seconds = max(idle_minutes * 60.0, 300.0) * 2.0
+        return now - stats.last_focused_at < reuse_window_seconds
 
     def _has_active_io(self, proc: psutil.Process) -> bool:
         try:

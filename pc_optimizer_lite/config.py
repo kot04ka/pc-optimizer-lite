@@ -23,7 +23,7 @@ DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 4.0
 class AppConfig:
     """Runtime settings persisted between application launches."""
 
-    config_version: int = 5
+    config_version: int = 6
     monitor_interval_seconds: float = 3.0
     process_refresh_seconds: float = 6.0
     lite_mode_enabled: bool = False
@@ -38,6 +38,8 @@ class AppConfig:
     user_whitelist_paths: list[str] = field(default_factory=list)
     window_starts_hidden: bool = False
     theme: str = "dark"
+    graph_collapsed: bool = False
+    core_table_collapsed: bool = False
     automation_mode: str = "observation"
     observation_only_mode: bool = True
     auto_close_mode: str = "ask"
@@ -73,6 +75,14 @@ class AppConfig:
     scheduled_cleanup_enabled: bool = False
     scheduled_cleanup_interval_minutes: float = 10.0
     scheduled_cleanup_notify: bool = False
+    auto_cleanup_cooldown_minutes: float = 5.0
+    cleanup_temp_enabled: bool = True
+    cleanup_windows_temp_enabled: bool = True
+    cleanup_browser_cache_enabled: bool = True
+    cleanup_prefetch_enabled: bool = False
+    cleanup_logs_enabled: bool = True
+    cleanup_logs_older_than_days: int = 7
+    cleanup_recycle_bin_enabled: bool = False
     optimize_step_snapshot_enabled: bool = True
     optimize_step_classify_enabled: bool = True
     optimize_step_ram_enabled: bool = True
@@ -133,6 +143,8 @@ def sanitize_config(config: AppConfig) -> AppConfig:
     config.user_whitelist_names = sorted({name.strip().lower() for name in config.user_whitelist_names if name.strip()})
     config.user_whitelist_paths = sorted({str(Path(path).expanduser()) for path in config.user_whitelist_paths if path.strip()})
     config.theme = config.theme if config.theme in {"dark", "light"} else "dark"
+    config.graph_collapsed = bool(config.graph_collapsed)
+    config.core_table_collapsed = bool(config.core_table_collapsed)
     if config.automation_mode not in {"observation", "manual", "autopilot"}:
         config.automation_mode = "observation" if config.observation_only_mode else "manual"
     config.auto_close_mode = config.auto_close_mode if config.auto_close_mode in {"off", "ask", "auto"} else "ask"
@@ -181,6 +193,14 @@ def sanitize_config(config: AppConfig) -> AppConfig:
     config.scheduled_cleanup_enabled = bool(config.scheduled_cleanup_enabled)
     config.scheduled_cleanup_interval_minutes = max(10.0, float(config.scheduled_cleanup_interval_minutes))
     config.scheduled_cleanup_notify = bool(config.scheduled_cleanup_notify)
+    config.auto_cleanup_cooldown_minutes = max(3.0, float(config.auto_cleanup_cooldown_minutes))
+    config.cleanup_temp_enabled = bool(config.cleanup_temp_enabled)
+    config.cleanup_windows_temp_enabled = bool(config.cleanup_windows_temp_enabled)
+    config.cleanup_browser_cache_enabled = bool(config.cleanup_browser_cache_enabled)
+    config.cleanup_prefetch_enabled = bool(config.cleanup_prefetch_enabled)
+    config.cleanup_logs_enabled = bool(config.cleanup_logs_enabled)
+    config.cleanup_logs_older_than_days = max(1, int(config.cleanup_logs_older_than_days))
+    config.cleanup_recycle_bin_enabled = bool(config.cleanup_recycle_bin_enabled)
     for key in (
         "optimize_step_snapshot_enabled",
         "optimize_step_classify_enabled",
@@ -226,6 +246,11 @@ def apply_automation_mode(config: AppConfig) -> AppConfig:
         config.sleep_enabled = True
         config.ram_auto_clean_enabled = True
         config.cpu_throttle_enabled = True
+        config.periodic_optimization_enabled = True
+        config.periodic_optimization_eco_mode = True
+        config.periodic_optimization_notify = True
+        config.scheduled_cleanup_enabled = True
+        config.scheduled_cleanup_notify = True
         config.auto_close_mode = "auto"
     return config
 
@@ -286,6 +311,18 @@ def _migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
     if version < 5:
         migrated["update_check_interval_hours"] = DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
         migrated["config_version"] = 5
+    if version < 6:
+        migrated.setdefault("graph_collapsed", False)
+        migrated.setdefault("core_table_collapsed", False)
+        migrated.setdefault("auto_cleanup_cooldown_minutes", 5.0)
+        migrated.setdefault("cleanup_temp_enabled", True)
+        migrated.setdefault("cleanup_windows_temp_enabled", True)
+        migrated.setdefault("cleanup_browser_cache_enabled", True)
+        migrated.setdefault("cleanup_prefetch_enabled", False)
+        migrated.setdefault("cleanup_logs_enabled", True)
+        migrated.setdefault("cleanup_logs_older_than_days", 7)
+        migrated.setdefault("cleanup_recycle_bin_enabled", False)
+        migrated["config_version"] = 6
     return migrated
 
 

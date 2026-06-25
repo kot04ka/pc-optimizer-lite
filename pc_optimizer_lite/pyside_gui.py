@@ -214,6 +214,7 @@ class CleanupWorker(QObject):
         self.plan = plan
 
     def run(self) -> None:
+        backgrounded = _set_current_thread_background_mode(True)
         try:
             if self.mode == "scan":
                 self.result_received.emit(self.mode, self.optimizer.scan_cleanup_files())
@@ -222,6 +223,9 @@ class CleanupWorker(QObject):
         except Exception as exc:
             LOGGER.exception("Cleanup worker failed")
             self.error_received.emit(str(exc))
+        finally:
+            if backgrounded:
+                _set_current_thread_background_mode(False)
 
 
 class RamCleanWorker(QObject):
@@ -237,6 +241,7 @@ class RamCleanWorker(QObject):
         self.purge_standby = purge_standby
 
     def run(self) -> None:
+        backgrounded = _set_current_thread_background_mode(True)
         try:
             result = self.ram_cleaner.clean(self.mode)
             if self.purge_standby and is_admin():
@@ -245,6 +250,9 @@ class RamCleanWorker(QObject):
         except Exception as exc:
             LOGGER.exception("RAM cleanup worker failed")
             self.error_received.emit(str(exc))
+        finally:
+            if backgrounded:
+                _set_current_thread_background_mode(False)
 
 
 class UpdateCheckWorker(QObject):
@@ -468,6 +476,7 @@ class MetricCard(QFrame):
         self._info_tooltip = ""
         self.setObjectName("MetricCard")
         self.setMinimumHeight(118)
+        self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         _add_shadow(self, palette)
 
@@ -480,6 +489,7 @@ class MetricCard(QFrame):
         self.icon_label.setPixmap(_feather_icon(icon_name, palette["accent"]).pixmap(22, 22))
         self.title_label = QLabel(title)
         self.title_label.setObjectName("CardTitle")
+        self.title_label.setWordWrap(True)
         self.info_label = QLabel("i")
         self.info_label.setObjectName("InfoBadge")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -494,8 +504,10 @@ class MetricCard(QFrame):
         self.value_label.setObjectName("CardValue")
         self.trend_label = QLabel("→")
         self.trend_label.setObjectName("TrendLabel")
+        self.trend_label.setToolTip("Тренд за последние 30 сек")
         self.detail_label = QLabel("")
         self.detail_label.setObjectName("CardDetail")
+        self.detail_label.setWordWrap(True)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setTextVisible(False)
@@ -574,23 +586,78 @@ class MetricCard(QFrame):
         if percent is None:
             self.trend_label.setText("→")
             self.trend_label.setStyleSheet(f"color: {self.palette['muted']};")
+            self.trend_label.setToolTip("Тренд за последние 30 сек: нет данных")
             return
         previous = self._last_percent
         self._last_percent = percent
         if previous is None:
             self.trend_label.setText("→")
             self.trend_label.setStyleSheet(f"color: {self.palette['muted']};")
+            self.trend_label.setToolTip("Тренд за последние 30 сек: без изменений")
             return
         delta = percent - previous
         if delta > 1.0:
             self.trend_label.setText("↑")
             self.trend_label.setStyleSheet(f"color: {self.palette['bad']};")
+            self.trend_label.setToolTip("Тренд за последние 30 сек: нагрузка растёт")
         elif delta < -1.0:
             self.trend_label.setText("↓")
             self.trend_label.setStyleSheet(f"color: {self.palette['good']};")
+            self.trend_label.setToolTip("Тренд за последние 30 сек: нагрузка снижается")
         else:
             self.trend_label.setText("→")
             self.trend_label.setStyleSheet(f"color: {self.palette['muted']};")
+            self.trend_label.setToolTip("Тренд за последние 30 сек: без заметного изменения")
+
+
+class CollapsibleSection(QFrame):
+    """Section with a persistent collapse toggle."""
+
+    collapsed_changed = Signal(bool)
+
+    def __init__(self, title: str, palette: dict[str, str], collapsed: bool = False) -> None:
+        super().__init__()
+        self._collapsed = False
+        self.setObjectName("CollapsibleSection")
+        _add_shadow(self, palette)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        self.toggle_button = QToolButton()
+        self.toggle_button.setObjectName("CollapseButton")
+        self.toggle_button.clicked.connect(self.toggle_collapsed)
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("SectionTitle")
+        header.addWidget(self.toggle_button)
+        header.addWidget(self.title_label)
+        header.addStretch(1)
+        layout.addLayout(header)
+
+        self.content = QWidget()
+        self.content.setObjectName("CollapsibleContent")
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.setSpacing(8)
+        layout.addWidget(self.content)
+        self.set_collapsed(collapsed, emit=False)
+
+    def toggle_collapsed(self) -> None:
+        self.set_collapsed(not self._collapsed)
+
+    def set_collapsed(self, collapsed: bool, *, emit: bool = True) -> None:
+        self._collapsed = bool(collapsed)
+        self.content.setVisible(not self._collapsed)
+        self.toggle_button.setText("▼" if self._collapsed else "▲")
+        self.toggle_button.setToolTip("Развернуть" if self._collapsed else "Свернуть")
+        if emit:
+            self.collapsed_changed.emit(self._collapsed)
+
+    @property
+    def collapsed(self) -> bool:
+        return self._collapsed
 
 
 class PCOptimizerQtWindow(QMainWindow):
@@ -638,6 +705,7 @@ class PCOptimizerQtWindow(QMainWindow):
         self._last_periodic_optimization_at = time.monotonic()
         self._last_scheduled_cleanup_at = time.monotonic()
         self._last_auto_ram_clean_at = 0.0
+        self._last_threshold_cpu_optimization_at = 0.0
         self._last_sleep_poll_at = 0.0
         self._foreground_monitor_interval = self.config.monitor_interval_seconds
         self._foreground_process_interval = self.config.process_refresh_seconds
@@ -676,6 +744,41 @@ class PCOptimizerQtWindow(QMainWindow):
         QTimer.singleShot(900, self._maybe_offer_lite_mode)
         QTimer.singleShot(2200, self._maybe_check_updates_on_startup)
 
+    def resizeEvent(self, event: object) -> None:
+        super().resizeEvent(event)
+        self._arrange_metric_cards()
+
+    def _arrange_metric_cards(self) -> None:
+        if not hasattr(self, "card_grid") or not hasattr(self, "metric_cards"):
+            return
+        viewport_width = self.monitor_scroll.viewport().width() if hasattr(self, "monitor_scroll") else self.width()
+        columns = 4 if viewport_width >= 1040 else 2 if viewport_width >= 620 else 1
+        for card in self.metric_cards:
+            self.card_grid.removeWidget(card)
+        for index, card in enumerate(self.metric_cards):
+            self.card_grid.addWidget(card, index // columns, index % columns)
+        for column in range(4):
+            self.card_grid.setColumnStretch(column, 1 if column < columns else 0)
+
+    def _graph_updates_allowed(self) -> bool:
+        return (
+            hasattr(self, "graph_section")
+            and not self.config.graph_collapsed
+            and self.isVisible()
+            and not self.isMinimized()
+            and hasattr(self, "tabs")
+            and self.tabs.currentWidget() == self.monitoring_tab
+        )
+
+    def _on_graph_section_collapsed(self, collapsed: bool) -> None:
+        self.config.graph_collapsed = collapsed
+        self.graph.set_live_updates_enabled(self._graph_updates_allowed())
+        save_config(self.config)
+
+    def _on_core_section_collapsed(self, collapsed: bool) -> None:
+        self.config.core_table_collapsed = collapsed
+        save_config(self.config)
+
     def _build_ui(self) -> None:
         self.tabs = QTabWidget(self)
         self.tabs.currentChanged.connect(lambda *_: self._sync_process_collection_mode())
@@ -708,10 +811,10 @@ class PCOptimizerQtWindow(QMainWindow):
         self.monitor_scroll.setFrameShape(QFrame.Shape.NoFrame)
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setContentsMargins(18, 18, 18, 12)
         layout.setSpacing(14)
         self.monitor_scroll.setWidget(content)
-        root_layout.addWidget(self.monitor_scroll)
+        root_layout.addWidget(self.monitor_scroll, 1)
 
         self.update_banner = QFrame()
         self.update_banner.setObjectName("UpdateBanner")
@@ -771,9 +874,10 @@ class PCOptimizerQtWindow(QMainWindow):
         optimize_layout.addLayout(cancel_row)
         layout.addWidget(optimize_panel)
 
-        card_grid = QGridLayout()
-        card_grid.setHorizontalSpacing(16)
-        card_grid.setVerticalSpacing(16)
+        self.card_grid = QGridLayout()
+        self.card_grid.setContentsMargins(0, 0, 0, 0)
+        self.card_grid.setHorizontalSpacing(16)
+        self.card_grid.setVerticalSpacing(16)
         self.cpu_card = MetricCard("CPU", "cpu", self.palette)
         self.ram_card = MetricCard("RAM", "memory", self.palette)
         self.disk_card = MetricCard("Диск", "hard-drive", self.palette)
@@ -782,32 +886,48 @@ class PCOptimizerQtWindow(QMainWindow):
             "Файл подкачки — резервное расширение ОЗУ на диске. "
             "Высокое использование (>70%) может говорить о нехватке физической памяти."
         )
-        cards = (self.cpu_card, self.ram_card, self.disk_card, self.swap_card)
-        for index, card in enumerate(cards):
-            card_grid.addWidget(card, 0, index)
-        for column in range(4):
-            card_grid.setColumnStretch(column, 1)
-        layout.addLayout(card_grid)
+        self.metric_cards = (self.cpu_card, self.ram_card, self.disk_card, self.swap_card)
+        layout.addLayout(self.card_grid)
+        self._arrange_metric_cards()
 
         self.graph = HistoryGraphWidget(self.palette)
-        layout.addWidget(self.graph)
+        self.graph_section = CollapsibleSection("График CPU/RAM", self.palette, self.config.graph_collapsed)
+        self.graph_section.collapsed_changed.connect(self._on_graph_section_collapsed)
+        self.graph_section.content_layout.addWidget(self.graph)
+        layout.addWidget(self.graph_section)
+        self.graph.set_live_updates_enabled(not self.config.graph_collapsed)
 
-        self.core_table = QTableWidget(0, 2)
-        self.core_table.setHorizontalHeaderLabels(["Ядро", "Нагрузка"])
+        self.core_table = QTableWidget(0, 3)
+        self.core_table.setHorizontalHeaderLabels(["Ядро", "Нагрузка", "%"])
         _configure_table(self.core_table, min_rows=3, max_height=190)
-        layout.addWidget(self.core_table)
+        self.core_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.core_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.core_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.core_section = CollapsibleSection("Ядра CPU", self.palette, self.config.core_table_collapsed)
+        self.core_section.collapsed_changed.connect(self._on_core_section_collapsed)
+        self.core_section.content_layout.addWidget(self.core_table)
+        layout.addWidget(self.core_section)
 
         self.disk_table = QTableWidget(0, 7)
         self.disk_table.setHorizontalHeaderLabels(["Диск", "Точка", "ФС", "Занято", "Свободно", "Всего", "%"])
         _configure_table(self.disk_table, min_rows=3, max_height=190)
         layout.addWidget(self.disk_table, 1)
 
-        actions = QHBoxLayout()
-        actions.addWidget(self._build_ram_clean_button())
-        actions.addWidget(_button("Очистить temp/cache", "trash", self.confirm_temp_cleanup, self.palette))
-        actions.addWidget(_button("Свернуть в трей", "minimize", self.hide_to_tray, self.palette))
-        actions.addStretch(1)
-        layout.addLayout(actions)
+        bottom_bar = QFrame()
+        bottom_bar.setObjectName("MonitorBottomBar")
+        bottom_bar.setFixedHeight(62)
+        bottom_layout = QHBoxLayout(bottom_bar)
+        bottom_layout.setContentsMargins(18, 10, 18, 10)
+        bottom_layout.setSpacing(10)
+        ram_label = QLabel("RAM")
+        ram_label.setObjectName("BottomBarLabel")
+        ram_label.setToolTip("Меню выбирает лёгкую или глубокую очистку RAM")
+        bottom_layout.addWidget(ram_label)
+        bottom_layout.addWidget(self._build_ram_clean_button())
+        bottom_layout.addWidget(_button("Очистить temp/cache", "trash", self.confirm_temp_cleanup, self.palette))
+        bottom_layout.addWidget(_button("Свернуть в трей", "minimize", self.hide_to_tray, self.palette))
+        bottom_layout.addStretch(1)
+        root_layout.addWidget(bottom_bar, 0)
 
     def _build_ram_clean_button(self) -> QToolButton:
         button = QToolButton()
@@ -861,8 +981,8 @@ class PCOptimizerQtWindow(QMainWindow):
         layout.addWidget(QLabel("Лента событий"))
         layout.addWidget(self.activity_table, 1)
 
-        self.sleep_table = QTableWidget(0, 5)
-        self.sleep_table.setHorizontalHeaderLabels(["PID", "Процесс", "Причина", "Состояние", "Действие"])
+        self.sleep_table = QTableWidget(0, 6)
+        self.sleep_table.setHorizontalHeaderLabels(["PID", "Процесс", "Уснул", "Причина", "Состояние", "Действие"])
         _configure_table(self.sleep_table, min_rows=3, max_height=170)
         layout.addWidget(QLabel("Спящие приложения"))
         layout.addWidget(self.sleep_table)
@@ -943,7 +1063,7 @@ class PCOptimizerQtWindow(QMainWindow):
         self.interval_edit = QLineEdit(str(self.config.monitor_interval_seconds))
         self.process_interval_edit = QLineEdit(str(self.config.process_refresh_seconds))
         self.cpu_threshold_edit = QLineEdit(str(self.config.cpu_threshold_percent))
-        self.cpu_sustain_edit = QLineEdit(str(int(round(self.config.cpu_sustain_seconds * 1000))))
+        self.cpu_sustain_edit = QLineEdit(str(self.config.cpu_sustain_seconds))
         self.ram_threshold_edit = QLineEdit(str(self.config.ram_threshold_percent))
         self.cooldown_edit = QLineEdit(str(self.config.notification_cooldown_seconds))
         self.max_priority_edit = QLineEdit(str(self.config.max_auto_priority_changes))
@@ -991,6 +1111,20 @@ class PCOptimizerQtWindow(QMainWindow):
         self.scheduled_cleanup_interval_edit = QLineEdit(str(self.config.scheduled_cleanup_interval_minutes))
         self.scheduled_cleanup_notify_check = _toggle("Тихое уведомление в трее после автоочистки")
         self.scheduled_cleanup_notify_check.setChecked(self.config.scheduled_cleanup_notify)
+        self.auto_cleanup_cooldown_edit = QLineEdit(str(self.config.auto_cleanup_cooldown_minutes))
+        self.cleanup_temp_check = _toggle("Temp текущего пользователя")
+        self.cleanup_temp_check.setChecked(self.config.cleanup_temp_enabled)
+        self.cleanup_windows_temp_check = _toggle("Windows Temp")
+        self.cleanup_windows_temp_check.setChecked(self.config.cleanup_windows_temp_enabled)
+        self.cleanup_browser_cache_check = _toggle("Кэши браузеров")
+        self.cleanup_browser_cache_check.setChecked(self.config.cleanup_browser_cache_enabled)
+        self.cleanup_prefetch_check = _toggle("Prefetch старше 7 дней")
+        self.cleanup_prefetch_check.setChecked(self.config.cleanup_prefetch_enabled)
+        self.cleanup_logs_check = _toggle("Логи Windows/WER старше N дней")
+        self.cleanup_logs_check.setChecked(self.config.cleanup_logs_enabled)
+        self.cleanup_logs_days_edit = QLineEdit(str(self.config.cleanup_logs_older_than_days))
+        self.cleanup_recycle_bin_check = _toggle("Корзина Windows (только при явном включении)")
+        self.cleanup_recycle_bin_check.setChecked(self.config.cleanup_recycle_bin_enabled)
         self.periodic_optimization_check = _toggle("Включить периодическую оптимизацию")
         self.periodic_optimization_check.setChecked(self.config.periodic_optimization_enabled)
         self.periodic_interval_edit = QLineEdit(str(self.config.periodic_optimization_interval_minutes))
@@ -1036,7 +1170,7 @@ class PCOptimizerQtWindow(QMainWindow):
 
         notifications_section, notifications_form = _settings_section("Уведомления", self.palette)
         _form_row(notifications_form, "Порог CPU, %", self.cpu_threshold_edit)
-        _form_row(notifications_form, "CPU выше порога, мс", self.cpu_sustain_edit)
+        _form_row(notifications_form, "CPU выше порога, сек", self.cpu_sustain_edit)
         _form_row(notifications_form, "Порог RAM, %", self.ram_threshold_edit)
         _form_row(notifications_form, "Антиспам уведомлений, сек", self.cooldown_edit)
         content_layout.addWidget(notifications_section)
@@ -1085,7 +1219,15 @@ class PCOptimizerQtWindow(QMainWindow):
         _form_row(cleanup_form, "", self.scheduled_cleanup_check)
         _form_row(cleanup_form, "Интервал, мин", self.scheduled_cleanup_interval_edit)
         _form_row(cleanup_form, "", self.scheduled_cleanup_notify_check)
-        cleanup_hint = QLabel("Выполняет безопасную очистку известных temp/cache папок, когда компьютер не занят.")
+        _form_row(cleanup_form, "Кулдаун автоочистки, мин", self.auto_cleanup_cooldown_edit)
+        _form_row(cleanup_form, "", self.cleanup_temp_check)
+        _form_row(cleanup_form, "", self.cleanup_windows_temp_check)
+        _form_row(cleanup_form, "", self.cleanup_browser_cache_check)
+        _form_row(cleanup_form, "", self.cleanup_prefetch_check)
+        _form_row(cleanup_form, "", self.cleanup_logs_check)
+        _form_row(cleanup_form, "Возраст логов, дней", self.cleanup_logs_days_edit)
+        _form_row(cleanup_form, "", self.cleanup_recycle_bin_check)
+        cleanup_hint = QLabel("Очищаются только заранее известные temp/cache/log roots. Документы и произвольные папки не сканируются.")
         cleanup_hint.setObjectName("SettingsHint")
         cleanup_form.addRow(cleanup_hint)
         content_layout.addWidget(cleanup_section)
@@ -1175,6 +1317,8 @@ class PCOptimizerQtWindow(QMainWindow):
             self.ram_auto_clean_check.setChecked(False)
             self.cpu_throttle_check.setChecked(False)
             self.cpu_limiter_check.setChecked(False)
+            self.scheduled_cleanup_check.setChecked(False)
+            self.periodic_optimization_check.setChecked(False)
             self.auto_close_combo.setCurrentIndex(0)
         elif mode == "autopilot":
             self.auto_priority_check.setChecked(True)
@@ -1182,6 +1326,11 @@ class PCOptimizerQtWindow(QMainWindow):
             self.ram_auto_clean_check.setChecked(True)
             self.cpu_optimizer_check.setChecked(True)
             self.cpu_throttle_check.setChecked(True)
+            self.scheduled_cleanup_check.setChecked(True)
+            self.scheduled_cleanup_notify_check.setChecked(True)
+            self.periodic_optimization_check.setChecked(True)
+            self.periodic_eco_check.setChecked(True)
+            self.periodic_notify_check.setChecked(True)
             self.auto_close_combo.setCurrentIndex(2)
 
     def _preview_lite_mode_defaults(self, enabled: bool) -> None:
@@ -1207,7 +1356,7 @@ class PCOptimizerQtWindow(QMainWindow):
             self.observation_only_check.setChecked(self.config.observation_only_mode)
             self.auto_priority_check.setChecked(self.config.auto_lower_priority_enabled)
             self.cpu_threshold_edit.setText(str(self.config.cpu_threshold_percent))
-            self.cpu_sustain_edit.setText(str(int(round(self.config.cpu_sustain_seconds * 1000))))
+            self.cpu_sustain_edit.setText(str(self.config.cpu_sustain_seconds))
             self.lite_mode_check.setChecked(self.config.lite_mode_enabled)
             self.interval_edit.setText(str(self.config.monitor_interval_seconds))
             self.process_interval_edit.setText(str(self.config.process_refresh_seconds))
@@ -1229,6 +1378,14 @@ class PCOptimizerQtWindow(QMainWindow):
             self.scheduled_cleanup_check.setChecked(self.config.scheduled_cleanup_enabled)
             self.scheduled_cleanup_interval_edit.setText(str(self.config.scheduled_cleanup_interval_minutes))
             self.scheduled_cleanup_notify_check.setChecked(self.config.scheduled_cleanup_notify)
+            self.auto_cleanup_cooldown_edit.setText(str(self.config.auto_cleanup_cooldown_minutes))
+            self.cleanup_temp_check.setChecked(self.config.cleanup_temp_enabled)
+            self.cleanup_windows_temp_check.setChecked(self.config.cleanup_windows_temp_enabled)
+            self.cleanup_browser_cache_check.setChecked(self.config.cleanup_browser_cache_enabled)
+            self.cleanup_prefetch_check.setChecked(self.config.cleanup_prefetch_enabled)
+            self.cleanup_logs_check.setChecked(self.config.cleanup_logs_enabled)
+            self.cleanup_logs_days_edit.setText(str(self.config.cleanup_logs_older_than_days))
+            self.cleanup_recycle_bin_check.setChecked(self.config.cleanup_recycle_bin_enabled)
             self.periodic_optimization_check.setChecked(self.config.periodic_optimization_enabled)
             self.periodic_interval_edit.setText(str(self.config.periodic_optimization_interval_minutes))
             self.periodic_eco_check.setChecked(self.config.periodic_optimization_eco_mode)
@@ -1251,8 +1408,9 @@ class PCOptimizerQtWindow(QMainWindow):
         box.setText("Автопилот будет сам выполнять безопасные действия в фоне.")
         box.setInformativeText(
             "PC Optimizer Lite сможет без отдельных подтверждений усыплять неактивные приложения, "
-            "понижать priority, выполнять лёгкую автоочистку RAM, включать CPU throttling и закрывать "
-            "только консервативно выбранные фоновые процессы вне whitelist. Все действия пишутся в историю."
+            "понижать priority, выполнять лёгкую автоочистку RAM/temp/cache, включать CPU throttling и закрывать "
+            "только консервативно выбранные фоновые процессы вне whitelist. Во время автопилота будут только toast-уведомления "
+            "и записи в историю."
         )
         checkbox = QCheckBox("Понимаю и согласен")
         box.setCheckBox(checkbox)
@@ -1295,7 +1453,9 @@ class PCOptimizerQtWindow(QMainWindow):
         if snapshot.processes:
             self.ram_cleaner.observe_processes(snapshot.processes)
         if monitoring_visible:
-            self.graph.queue_point(snapshot.cpu_percent, snapshot.memory.percent)
+            self.graph.set_live_updates_enabled(self._graph_updates_allowed())
+            if not self.config.graph_collapsed:
+                self.graph.queue_point(snapshot.cpu_percent, snapshot.memory.percent)
             self.cpu_card.set_metric(f"{snapshot.cpu_percent:.1f}%", f"{len(snapshot.per_core_cpu_percent)} ядер", snapshot.cpu_percent)
             self.ram_card.set_metric(
                 f"{snapshot.memory.percent:.1f}%",
@@ -1313,12 +1473,18 @@ class PCOptimizerQtWindow(QMainWindow):
                 f"R {format_bytes(snapshot.disk_io.read_bytes_per_second)}/s · W {format_bytes(snapshot.disk_io.write_bytes_per_second)}/s",
                 max_disk,
             )
-            self._render_cores(snapshot.per_core_cpu_percent)
+            if not self.config.core_table_collapsed:
+                self._render_cores(snapshot.per_core_cpu_percent)
             self._render_disks(snapshot)
         if processes_visible and snapshot.processes:
             self._render_processes(snapshot.processes)
         self._handle_thresholds(snapshot)
         if not self.config.observation_only_mode:
+            wake_actions = self.sleep_manager.resume_foreground_if_sleeping()
+            if wake_actions:
+                for action in wake_actions:
+                    self._log_sleep_action(action)
+                self.refresh_activity()
             self._maybe_poll_sleep_manager()
             self._maybe_cpu_throttle(snapshot)
             self._maybe_auto_ram_clean(snapshot)
@@ -1394,16 +1560,19 @@ class PCOptimizerQtWindow(QMainWindow):
     def _on_optimization_result(self, result: OptimizationResult) -> None:
         self._last_optimization_result = result
         self.refresh_activity()
-        self.refresh_process_table()
+        if not self._optimization_quiet or (
+            self.isVisible() and not self.isMinimized() and self.tabs.currentWidget() == self.processes_tab
+        ):
+            self.refresh_process_table()
         if self._optimization_quiet:
-            if self.config.periodic_optimization_notify and self.tray.isVisible():
-                detail = f"RAM {result.ram_before_percent:.1f}%→{result.ram_after_percent:.1f}%, CPU {result.cpu_before:.1f}%→{result.cpu_after:.1f}%"
-                self.tray.showMessage(
-                    "PC Optimizer Lite",
-                    f"Тихая оптимизация завершена: {detail}",
-                    QSystemTrayIcon.MessageIcon.Information,
-                    2500,
-                )
+            cleanup_bytes = result.cleanup_result.freed_bytes if result.cleanup_result else 0
+            detail = (
+                f"RAM {result.ram_before_percent:.1f}%→{result.ram_after_percent:.1f}%, "
+                f"CPU {result.cpu_before:.1f}%→{result.cpu_after:.1f}%, disk {format_bytes(cleanup_bytes)}"
+            )
+            self.history.add_event("optimization", "Автооптимизация завершена", detail, "success" if not result.errors else "warning")
+            if self.config.periodic_optimization_notify or self.config.automation_mode == "autopilot":
+                self._notify_cleanup_summary(result.ram_freed_bytes, cleanup_bytes, key="auto_optimization_done")
             return
         self.optimize_button.setEnabled(True)
         self.optimize_button.setText("Оптимизировать")
@@ -1487,8 +1656,13 @@ class PCOptimizerQtWindow(QMainWindow):
             progress = QProgressBar()
             progress.setRange(0, 100)
             progress.setValue(round(value))
-            progress.setFormat(f"{value:.0f}%")
+            progress.setTextVisible(False)
+            progress.setToolTip(f"{value:.0f}%")
             self.core_table.setCellWidget(row, 1, progress)
+            percent_item = QTableWidgetItem(f"{value:.0f}%")
+            percent_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            percent_item.setForeground(_status_color(value, self.palette))
+            self.core_table.setItem(row, 2, percent_item)
             self.core_table.setRowHeight(row, 30)
         _fit_table_height(self.core_table, min_rows=3, max_height=190)
 
@@ -1645,10 +1819,11 @@ class PCOptimizerQtWindow(QMainWindow):
             if now - self._high_cpu_since >= self.config.cpu_sustain_seconds:
                 self.notifier.notify(
                     "Высокая нагрузка CPU",
-                    f"CPU {snapshot.cpu_percent:.0f}% держится дольше {self.config.cpu_sustain_seconds * 1000:.0f} мс.",
+                    f"CPU {snapshot.cpu_percent:.0f}% держится дольше {self.config.cpu_sustain_seconds:.1f} сек.",
                     key="high_cpu",
                 )
-                self._maybe_auto_lower_priority(snapshot)
+                if not self._maybe_threshold_cpu_optimization(snapshot):
+                    self._maybe_auto_lower_priority(snapshot)
         else:
             self._high_cpu_since = None
 
@@ -1658,6 +1833,37 @@ class PCOptimizerQtWindow(QMainWindow):
                 f"RAM занята на {snapshot.memory.percent:.0f}%.",
                 key="high_ram",
             )
+
+    def _auto_cleanup_cooldown_seconds(self) -> float:
+        return max(180.0, self.config.auto_cleanup_cooldown_minutes * 60.0)
+
+    def _maybe_threshold_cpu_optimization(self, snapshot: MonitorSnapshot) -> bool:
+        if self.config.observation_only_mode:
+            return False
+        if not (
+            self.config.cpu_optimizer_enabled
+            or self.config.cpu_throttle_enabled
+            or self.config.auto_lower_priority_enabled
+        ):
+            return False
+        if self._optimization_thread and self._optimization_thread.isRunning():
+            return False
+        now = time.monotonic()
+        if now - self._last_threshold_cpu_optimization_at < self._auto_cleanup_cooldown_seconds():
+            return False
+        if self._user_recently_active(snapshot):
+            return False
+        started = self._start_optimization(eco_mode=True, quiet=True)
+        if not started:
+            return False
+        self._last_threshold_cpu_optimization_at = now
+        self.history.add_event(
+            "optimization",
+            "CPU threshold optimization started",
+            f"CPU {snapshot.cpu_percent:.0f}% held above {self.config.cpu_threshold_percent:.0f}%",
+            "info",
+        )
+        return True
 
     def _maybe_auto_lower_priority(self, snapshot: MonitorSnapshot) -> None:
         if (
@@ -1669,7 +1875,9 @@ class PCOptimizerQtWindow(QMainWindow):
         now = time.monotonic()
         if now - self._last_auto_priority_at < self.config.notification_cooldown_seconds:
             return
-        processes = snapshot.processes or self.monitor.get_processes(max_processes=80)
+        processes = snapshot.processes
+        if not processes:
+            return
         actions = self.optimizer.lower_priority_for_heavy_processes(
             processes,
             limit=self.config.max_auto_priority_changes,
@@ -1838,13 +2046,13 @@ class PCOptimizerQtWindow(QMainWindow):
     def _handle_cleanup_plan(self, plan: CleanupPlan, context: dict[str, object]) -> None:
         automatic = bool(context.get("automatic"))
         notify = bool(context.get("notify"))
-        if plan.file_count == 0:
+        if plan.file_count == 0 and plan.total_bytes == 0:
             detail = "В известных temp/cache папках нечего очищать."
             self.history.add_event("cleanup", "Очистка temp/cache", detail, "info")
             if not automatic:
                 QMessageBox.information(self, "Очистка", detail)
             elif notify:
-                self.notifier.notify("PC Optimizer Lite", detail, key="scheduled_cleanup_empty")
+                self._notify_cleanup_summary(0, 0, key="scheduled_cleanup_empty")
             self.refresh_activity()
             return
         if not automatic:
@@ -1862,6 +2070,10 @@ class PCOptimizerQtWindow(QMainWindow):
                 return
         self._start_cleanup_worker(mode="cleanup", plan=plan, context=context)
 
+    def _notify_cleanup_summary(self, ram_bytes: int, disk_bytes: int, *, key: str) -> bool:
+        message = f"Очищено: освобождено {format_bytes(ram_bytes)} RAM / {format_bytes(disk_bytes)} диска"
+        return self.notifier.notify("PC Optimizer Lite", message, key=key)
+
     def _handle_cleanup_result(self, result, context: dict[str, object]) -> None:
         automatic = bool(context.get("automatic"))
         notify = bool(context.get("notify"))
@@ -1875,7 +2087,10 @@ class PCOptimizerQtWindow(QMainWindow):
             severity,
         )
         if notify or not automatic:
-            self.notifier.notify("PC Optimizer Lite", message, key="scheduled_cleanup" if automatic else "manual_cleanup")
+            if automatic:
+                self._notify_cleanup_summary(0, result.freed_bytes, key="scheduled_cleanup")
+            else:
+                self.notifier.notify("PC Optimizer Lite", message, key="manual_cleanup")
         if not automatic:
             deleted_summary = _format_result_categories(result.categories)
             QMessageBox.information(
@@ -1952,11 +2167,14 @@ class PCOptimizerQtWindow(QMainWindow):
                 _format_ram_clean_report(result),
             )
         if notify or not automatic:
-            self.notifier.notify(
-                "PC Optimizer Lite",
-                f"Освобождено {format_bytes(result.freed_bytes)} RAM (было {result.ram_percent_before:.1f}% → стало {result.ram_percent_after:.1f}%)",
-                key="auto_ram_clean" if automatic else "manual_ram_clean",
-            )
+            if automatic:
+                self._notify_cleanup_summary(result.freed_bytes, 0, key="auto_ram_clean")
+            else:
+                self.notifier.notify(
+                    "PC Optimizer Lite",
+                    f"Освобождено {format_bytes(result.freed_bytes)} RAM (было {result.ram_percent_before:.1f}% → стало {result.ram_percent_after:.1f}%)",
+                    key="manual_ram_clean",
+                )
         self.refresh_activity()
 
     def _on_ram_clean_error(self, message: str) -> None:
@@ -1998,10 +2216,12 @@ class PCOptimizerQtWindow(QMainWindow):
         if snapshot.memory.percent < self.config.ram_auto_clean_threshold_percent:
             return
         now = time.monotonic()
-        if now - self._last_auto_ram_clean_at < self.config.notification_cooldown_seconds:
+        if now - self._last_auto_ram_clean_at < self._auto_cleanup_cooldown_seconds():
+            return
+        if self._user_recently_active(snapshot) and snapshot.memory.percent < self.config.ram_auto_clean_threshold_percent + 5.0:
             return
         self._last_auto_ram_clean_at = now
-        self.clean_ram(RamCleanMode.LIGHT, automatic=True)
+        self.clean_ram(RamCleanMode.LIGHT, automatic=True, event_title="RAM threshold auto-clean")
 
     def _maybe_scheduled_auto_cleanup(self, snapshot: MonitorSnapshot) -> None:
         if not self.config.scheduled_cleanup_enabled:
@@ -2037,11 +2257,17 @@ class PCOptimizerQtWindow(QMainWindow):
         sleeping = self.sleep_manager.sleeping
         self.sleep_table.setRowCount(len(sleeping))
         for row, entry in enumerate(sleeping):
-            values = (str(entry.pid), entry.name, entry.reason, "suspended" if entry.suspended else "idle priority")
+            values = (
+                str(entry.pid),
+                entry.name,
+                _format_time(entry.slept_at),
+                entry.reason,
+                "suspended" if entry.suspended else "idle priority",
+            )
             for column, value in enumerate(values):
                 self.sleep_table.setItem(row, column, QTableWidgetItem(value))
             button = _button("Разбудить", "play", lambda pid=entry.pid: self.wake_process(pid), self.palette)
-            self.sleep_table.setCellWidget(row, 4, button)
+            self.sleep_table.setCellWidget(row, 5, button)
 
         closed = self.history.get_closed_processes()
         self.closed_table.setRowCount(len(closed))
@@ -2120,7 +2346,7 @@ class PCOptimizerQtWindow(QMainWindow):
             self.config.monitor_interval_seconds = float(self.interval_edit.text())
             self.config.process_refresh_seconds = float(self.process_interval_edit.text())
             self.config.cpu_threshold_percent = float(self.cpu_threshold_edit.text())
-            self.config.cpu_sustain_seconds = float(self.cpu_sustain_edit.text()) / 1000.0
+            self.config.cpu_sustain_seconds = float(self.cpu_sustain_edit.text())
             self.config.ram_threshold_percent = float(self.ram_threshold_edit.text())
             self.config.notification_cooldown_seconds = float(self.cooldown_edit.text())
             self.config.max_auto_priority_changes = int(float(self.max_priority_edit.text()))
@@ -2148,6 +2374,14 @@ class PCOptimizerQtWindow(QMainWindow):
             self.config.scheduled_cleanup_enabled = self.scheduled_cleanup_check.isChecked()
             self.config.scheduled_cleanup_interval_minutes = float(self.scheduled_cleanup_interval_edit.text())
             self.config.scheduled_cleanup_notify = self.scheduled_cleanup_notify_check.isChecked()
+            self.config.auto_cleanup_cooldown_minutes = float(self.auto_cleanup_cooldown_edit.text())
+            self.config.cleanup_temp_enabled = self.cleanup_temp_check.isChecked()
+            self.config.cleanup_windows_temp_enabled = self.cleanup_windows_temp_check.isChecked()
+            self.config.cleanup_browser_cache_enabled = self.cleanup_browser_cache_check.isChecked()
+            self.config.cleanup_prefetch_enabled = self.cleanup_prefetch_check.isChecked()
+            self.config.cleanup_logs_enabled = self.cleanup_logs_check.isChecked()
+            self.config.cleanup_logs_older_than_days = int(float(self.cleanup_logs_days_edit.text()))
+            self.config.cleanup_recycle_bin_enabled = self.cleanup_recycle_bin_check.isChecked()
             self.config.periodic_optimization_enabled = self.periodic_optimization_check.isChecked()
             self.config.periodic_optimization_interval_minutes = float(self.periodic_interval_edit.text())
             self.config.periodic_optimization_eco_mode = self.periodic_eco_check.isChecked()
@@ -2488,7 +2722,7 @@ class PCOptimizerQtWindow(QMainWindow):
         self.monitor.interval_seconds = self._foreground_monitor_interval
         self.monitor.process_refresh_seconds = self._foreground_process_interval
         self.graph.set_lite_mode(self.config.lite_mode_enabled)
-        self.graph.set_live_updates_enabled(True)
+        self.graph.set_live_updates_enabled(self._graph_updates_allowed())
         self._sync_process_collection_mode()
         if hasattr(self, "activity_timer"):
             self.activity_timer.setInterval(25000 if self.config.lite_mode_enabled else 15000)
@@ -2497,6 +2731,8 @@ class PCOptimizerQtWindow(QMainWindow):
         visible = self.isVisible() and not self.isMinimized()
         enabled = visible and hasattr(self, "tabs") and self.tabs.currentWidget() == self.processes_tab
         self.monitor.set_process_collection_enabled(enabled)
+        if hasattr(self, "graph"):
+            self.graph.set_live_updates_enabled(self._graph_updates_allowed())
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._allow_close:
@@ -2552,7 +2788,7 @@ def run_app(config: AppConfig) -> int:
         interval_seconds=config.monitor_interval_seconds,
         process_refresh_seconds=config.process_refresh_seconds,
     )
-    optimizer = SystemOptimizer(whitelist)
+    optimizer = SystemOptimizer(whitelist, config)
     notifier = SystemNotifier(cooldown_seconds=config.notification_cooldown_seconds)
     smart_manager = SmartProcessManager(whitelist, history)
     sleep_manager = SleepManager(whitelist, history)
@@ -2601,6 +2837,19 @@ def _seconds_since_last_input() -> float:
         return max(0.0, (int(tick_count) - int(info.dwTime)) / 1000.0)
     except Exception:
         return 3600.0
+
+
+def _set_current_thread_background_mode(enabled: bool) -> bool:
+    """Ask Windows to run the current worker thread in background mode."""
+
+    if not hasattr(ctypes, "windll"):
+        return False
+    try:
+        kernel32 = ctypes.windll.kernel32
+        priority = 0x00010000 if enabled else 0x00020000
+        return bool(kernel32.SetThreadPriority(kernel32.GetCurrentThread(), priority))
+    except Exception:
+        return False
 
 
 def _add_shadow(widget: QWidget, palette: dict[str, str]) -> None:
@@ -2744,7 +2993,7 @@ def _qss(palette: dict[str, str]) -> str:
         border: 1px solid {palette["border"]};
         border-radius: 10px;
     }}
-    QFrame#MetricCard, QFrame#SettingsSection {{
+    QFrame#MetricCard, QFrame#SettingsSection, QFrame#CollapsibleSection {{
         background: {palette["panel"]};
         border: 1px solid {palette["border"]};
         border-radius: 12px;
@@ -2753,6 +3002,17 @@ def _qss(palette: dict[str, str]) -> str:
         background: {palette["panel"]};
         border: 1px solid {palette["border"]};
         border-radius: 12px;
+    }}
+    QFrame#MonitorBottomBar {{
+        background: {palette["panel"]};
+        border-top: 1px solid {palette["border"]};
+        border-left: none;
+        border-right: none;
+        border-bottom: none;
+    }}
+    QWidget#CollapsibleContent {{
+        background: transparent;
+        border: none;
     }}
     QScrollArea#MonitorScroll, QScrollArea#SettingsScroll {{
         background: transparent;
@@ -2867,6 +3127,13 @@ def _qss(palette: dict[str, str]) -> str:
         background: transparent;
         border: none;
         padding-bottom: 4px;
+    }}
+    QLabel#BottomBarLabel {{
+        color: {palette["muted"]};
+        background: transparent;
+        border: none;
+        font-weight: 700;
+        padding: 0px 4px 0px 0px;
     }}
     QLabel#SettingsHint {{
         color: {palette["muted"]};
@@ -2985,6 +3252,15 @@ def _qss(palette: dict[str, str]) -> str:
     }}
     QToolButton#RamCleanButton {{
         font-weight: 650;
+    }}
+    QToolButton#CollapseButton {{
+        min-width: 28px;
+        max-width: 28px;
+        min-height: 26px;
+        max-height: 26px;
+        padding: 0px;
+        border-radius: 7px;
+        font-weight: 800;
     }}
     """
 
