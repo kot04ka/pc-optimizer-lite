@@ -9,6 +9,9 @@ if (-not $VersionMatch) {
 $Version = $VersionMatch.Matches[0].Groups[1].Value
 $VenvPython = Join-Path $Root '.venv\Scripts\python.exe'
 $PortableExe = Join-Path $Root 'dist\PC Optimizer Lite.exe'
+$OnedirSpecPath = Join-Path $Root 'PC Optimizer Lite Onedir.spec'
+$OnedirAppDir = Join-Path $Root 'dist\PC Optimizer Lite'
+$OnedirExe = Join-Path $OnedirAppDir 'PC Optimizer Lite.exe'
 $InstallerOutput = Join-Path $Root 'installer_output'
 $InstallerExe = Join-Path $InstallerOutput 'PC-Optimizer-Lite-Setup.exe'
 $IconPath = Join-Path $Root 'assets\pc_optimizer_lite.ico'
@@ -58,7 +61,7 @@ function Build-IExpressInstaller {
         Remove-Item -LiteralPath $payloadDir -Recurse -Force
     }
     New-Item -ItemType Directory -Force -Path $payloadDir | Out-Null
-    Copy-Item -LiteralPath $PortableExe -Destination (Join-Path $payloadDir 'PCOptimizerLite.exe') -Force
+    Copy-Item -Path (Join-Path $OnedirAppDir '*') -Destination $payloadDir -Recurse -Force
     $installScript = (Get-Content -LiteralPath (Join-Path $Root 'installer\install.ps1') -Raw).Replace('__APP_VERSION__', $Version)
     Set-Content -LiteralPath (Join-Path $payloadDir 'install.ps1') -Value $installScript -Encoding UTF8
 
@@ -91,7 +94,7 @@ UserQuietInstCmd=
 SourceFiles=SourceFiles
 
 [Strings]
-FILE0="PCOptimizerLite.exe"
+FILE0="PC Optimizer Lite.exe"
 FILE1="install.ps1"
 
 [SourceFiles]
@@ -127,7 +130,7 @@ function Build-PyInstallerInstaller {
         --workpath $installerWork `
         --specpath $installerSpec `
         --icon $IconPath `
-        --add-data "$PortableExe;payload" `
+        --add-data "$OnedirAppDir;payload" `
         --hidden-import psutil `
         --hidden-import pc_optimizer_lite.pyside_gui `
         --hidden-import pc_optimizer_lite.autostart `
@@ -135,6 +138,7 @@ function Build-PyInstallerInstaller {
         --hidden-import pc_optimizer_lite.cpu_throttler `
         --hidden-import pc_optimizer_lite.history_manager `
         --hidden-import pc_optimizer_lite.optimize_action `
+        --hidden-import pc_optimizer_lite.pagefile `
         --hidden-import pc_optimizer_lite.ram_cleaner `
         --hidden-import pc_optimizer_lite.sleep_manager `
         --hidden-import pc_optimizer_lite.updater `
@@ -187,6 +191,14 @@ if (-not (Test-Path -LiteralPath $PortableExe)) {
     throw "Portable EXE was not built: $PortableExe"
 }
 
+& $Python -m PyInstaller --noconfirm --clean $OnedirSpecPath
+if ($LASTEXITCODE -ne 0) {
+    throw "Onedir PyInstaller failed with exit code $LASTEXITCODE"
+}
+if (-not (Test-Path -LiteralPath $OnedirExe)) {
+    throw "Onedir EXE was not built: $OnedirExe"
+}
+
 $iscc = Get-InnoCompiler
 if ($iscc) {
     & $iscc "/DMyAppVersion=$Version" $InnoScript
@@ -203,6 +215,7 @@ if ($iscc) {
 Write-Host ''
 Write-Host 'Build completed.'
 Write-Host "Portable EXE: $PortableExe"
+Write-Host "Installer onedir app: $OnedirAppDir"
 if (Test-Path -LiteralPath $InstallerExe) {
     Write-Host "Installer: $InstallerExe"
 } else {

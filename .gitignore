@@ -12,6 +12,7 @@ installer_output/
 .agents/
 *.spec
 !PC Optimizer Lite.spec
+!PC Optimizer Lite Onedir.spec
 *.exe
 *.pkg
 *.log

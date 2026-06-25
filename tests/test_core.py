@@ -2,22 +2,36 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
 from pc_optimizer_lite.autostart import get_launch_command
-from pc_optimizer_lite.config import AppConfig, apply_automation_mode, load_config, save_config, sanitize_config
+from pc_optimizer_lite.config import (
+    AppConfig,
+    HardwareProfile,
+    apply_automation_mode,
+    apply_optimal_preset,
+    load_config,
+    save_config,
+    sanitize_config,
+)
 from pc_optimizer_lite.cpu_optimizer import CpuOptimizer
 from pc_optimizer_lite.cpu_throttler import CpuThrottler
 from pc_optimizer_lite.history_manager import HistoryManager
 from pc_optimizer_lite.monitor import DiskIOInfo, MemoryInfo, MonitorSnapshot, ProcessInfo, SwapInfo
 from pc_optimizer_lite.optimize_action import ProcessOptimizationSnapshot, _classify_processes, _step_enabled
 from pc_optimizer_lite.optimizer import CleanupTarget, SystemOptimizer
+from pc_optimizer_lite.pagefile import (
+    PageFileStatus,
+    build_enable_auto_pagefile_command,
+    recommend_pagefile_action,
+)
 from pc_optimizer_lite.ram_cleaner import RamCleanMode, RamCleanResult
 from pc_optimizer_lite.sleep_manager import SKIP_SLEEP_NAMES, SleepManager
 from pc_optimizer_lite.smart_process_manager import SmartProcessManager
-from pc_optimizer_lite.updater import is_newer_version, is_repository_configured
+from pc_optimizer_lite.updater import _replacement_script, is_newer_version, is_repository_configured
 from pc_optimizer_lite.whitelist import Whitelist
 
 
@@ -57,7 +71,42 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.scheduled_cleanup_notify)
         self.assertTrue(config.periodic_optimization_enabled)
         self.assertTrue(config.periodic_optimization_notify)
-        self.assertEqual(config.auto_close_mode, "auto")
+        self.assertEqual(config.auto_close_mode, "off")
+
+    def test_optimal_balanced_preset_enables_safe_autonomy_without_auto_close(self) -> None:
+        config = apply_optimal_preset(
+            AppConfig(),
+            HardwareProfile(cpu_cores=6, ram_bytes=16 * 1024**3, disk_kind="ssd"),
+        )
+
+        self.assertEqual(config.optimal_preset_tier, "balanced")
+        self.assertEqual(config.automation_mode, "autopilot")
+        self.assertFalse(config.observation_only_mode)
+        self.assertTrue(config.ram_auto_clean_enabled)
+        self.assertEqual(config.ram_auto_clean_threshold_percent, 80.0)
+        self.assertEqual(config.cpu_threshold_percent, 85.0)
+        self.assertEqual(config.cpu_sustain_seconds, 3.0)
+        self.assertTrue(config.cpu_throttle_enabled)
+        self.assertTrue(config.scheduled_cleanup_enabled)
+        self.assertEqual(config.scheduled_cleanup_interval_minutes, 15.0)
+        self.assertTrue(config.sleep_enabled)
+        self.assertEqual(config.sleep_after_minutes, 15.0)
+        self.assertTrue(config.scheduled_cleanup_notify)
+        self.assertTrue(config.periodic_optimization_notify)
+        self.assertEqual(config.auto_close_mode, "off")
+
+    def test_optimal_low_end_preset_uses_lite_mode_and_slower_polling(self) -> None:
+        config = apply_optimal_preset(
+            AppConfig(),
+            HardwareProfile(cpu_cores=2, ram_bytes=4 * 1024**3, disk_kind="hdd"),
+        )
+
+        self.assertEqual(config.optimal_preset_tier, "low")
+        self.assertTrue(config.lite_mode_enabled)
+        self.assertGreaterEqual(config.monitor_interval_seconds, 3.5)
+        self.assertGreaterEqual(config.process_refresh_seconds, 12.0)
+        self.assertLessEqual(config.cpu_optimizer_max_processes, 2)
+        self.assertEqual(config.auto_close_mode, "off")
 
     def test_auto_cleanup_settings_are_clamped(self) -> None:
         config = sanitize_config(
@@ -184,6 +233,134 @@ class CleanupTests(unittest.TestCase):
                 optimizer.get_safe_temp_roots = original_get_roots  # type: ignore[method-assign]
             self.assertEqual(plan.file_count, 3)
             self.assertGreaterEqual(len(pauses), 2)
+
+
+class UpdaterSafetyTests(unittest.TestCase):
+    def test_replacement_script_waits_with_timeout_and_retries_locked_exe(self) -> None:
+        script = _replacement_script(
+            current=Path(r"C:\Apps\PC Optimizer Lite\PC Optimizer Lite.exe"),
+            staged=Path(r"C:\Apps\PC Optimizer Lite\PC Optimizer Lite_new.exe"),
+            pid=4242,
+        )
+
+        self.assertIn("$deadline", script)
+        self.assertIn("Timed out waiting for process 4242", script)
+        self.assertIn("for ($attempt = 1", script)
+        self.assertIn("Move-Item -LiteralPath $new", script)
+        self.assertIn("$backup", script)
+        self.assertIn("Get-ProcessesByExecutablePath", script)
+        self.assertIn("Stop-ProcessesByExecutablePath $backup", script)
+        self.assertIn("pc_optimizer_lite_update_cleanup", script)
+        self.assertIn("$removed = $false", script)
+        self.assertIn("for ($attempt = 1; $attempt -le 120", script)
+        self.assertIn("Backup cleanup deferred", script)
+        self.assertIn("Rename-Item -LiteralPath $old", script)
+        self.assertIn("-ErrorAction Stop", script)
+        self.assertIn("$replaced = $true", script)
+        self.assertIn("Update replacement failed", script)
+        self.assertLess(script.index("if (-not $replaced)"), script.index("Start-Process"))
+
+
+class PageFileTests(unittest.TestCase):
+    def test_recommendation_enables_windows_auto_management_when_pagefile_disabled_on_low_ram(self) -> None:
+        advice = recommend_pagefile_action(
+            PageFileStatus(
+                total_ram_bytes=4 * 1024**3,
+                pagefile_total_bytes=0,
+                pagefile_used_bytes=0,
+                pagefile_percent=0.0,
+                automatic_managed=False,
+            )
+        )
+
+        self.assertEqual(advice.action, "enable_auto")
+        self.assertTrue(advice.requires_admin)
+        self.assertIn("автоматическое управление", advice.title.lower())
+
+    def test_recommendation_is_read_only_when_windows_already_manages_pagefile(self) -> None:
+        advice = recommend_pagefile_action(
+            PageFileStatus(
+                total_ram_bytes=16 * 1024**3,
+                pagefile_total_bytes=8 * 1024**3,
+                pagefile_used_bytes=1 * 1024**3,
+                pagefile_percent=12.5,
+                automatic_managed=True,
+            )
+        )
+
+        self.assertEqual(advice.action, "none")
+        self.assertFalse(advice.requires_admin)
+
+    def test_enable_auto_pagefile_command_uses_windows_system_setting(self) -> None:
+        command = build_enable_auto_pagefile_command()
+        self.assertIn("Win32_ComputerSystem", command)
+        self.assertIn("AutomaticManagedPagefile=$true", command)
+
+
+class InstallerTests(unittest.TestCase):
+    def test_perform_install_copies_onedir_payload_and_removes_stale_update_files(self) -> None:
+        from installer import installer_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload = root / "payload"
+            internal = payload / "_internal"
+            internal.mkdir(parents=True)
+            (payload / "PC Optimizer Lite.exe").write_bytes(b"new exe")
+            (internal / "python312.dll").write_bytes(b"dll")
+            local_app_data = root / "LocalAppData"
+            app_data = root / "AppData"
+            install_dir = local_app_data / "Programs" / "PC Optimizer Lite"
+            install_dir.mkdir(parents=True)
+            (install_dir / "PC Optimizer Lite_new.exe").write_bytes(b"stale")
+            (install_dir / "apply_pc_optimizer_lite_update.ps1").write_text("stale", encoding="utf-8")
+
+            old_local = os.environ.get("LOCALAPPDATA")
+            old_appdata = os.environ.get("APPDATA")
+            original_resource_path = installer_app.resource_path
+            original_create_shortcut = installer_app.create_shortcut
+            original_set_run_value = installer_app.set_run_value
+            original_write_uninstaller = installer_app.write_uninstaller
+            original_register_uninstall = installer_app.register_uninstall
+            original_stop_installed_copy = installer_app.stop_installed_copy
+            original_desktop_shortcut = installer_app.desktop_shortcut
+            original_start_menu_dir = installer_app.start_menu_dir
+            try:
+                os.environ["LOCALAPPDATA"] = str(local_app_data)
+                os.environ["APPDATA"] = str(app_data)
+                installer_app.resource_path = lambda relative: payload if relative == "payload" else payload / relative  # type: ignore[assignment]
+                installer_app.create_shortcut = lambda *_args, **_kwargs: None  # type: ignore[assignment]
+                installer_app.set_run_value = lambda *_args, **_kwargs: None  # type: ignore[assignment]
+                installer_app.write_uninstaller = lambda target_dir: target_dir / "Uninstall.ps1"  # type: ignore[assignment]
+                installer_app.register_uninstall = lambda *_args, **_kwargs: None  # type: ignore[assignment]
+                installer_app.stop_installed_copy = lambda *_args, **_kwargs: None  # type: ignore[assignment]
+                installer_app.desktop_shortcut = lambda: root / "Desktop" / "PC Optimizer Lite.lnk"  # type: ignore[assignment]
+                installer_app.start_menu_dir = lambda: root / "StartMenu" / "PC Optimizer Lite"  # type: ignore[assignment]
+
+                target = installer_app.perform_install(create_desktop=False, autostart=False)
+            finally:
+                if old_local is None:
+                    os.environ.pop("LOCALAPPDATA", None)
+                else:
+                    os.environ["LOCALAPPDATA"] = old_local
+                if old_appdata is None:
+                    os.environ.pop("APPDATA", None)
+                else:
+                    os.environ["APPDATA"] = old_appdata
+                installer_app.resource_path = original_resource_path  # type: ignore[assignment]
+                installer_app.create_shortcut = original_create_shortcut  # type: ignore[assignment]
+                installer_app.set_run_value = original_set_run_value  # type: ignore[assignment]
+                installer_app.write_uninstaller = original_write_uninstaller  # type: ignore[assignment]
+                installer_app.register_uninstall = original_register_uninstall  # type: ignore[assignment]
+                installer_app.stop_installed_copy = original_stop_installed_copy  # type: ignore[assignment]
+                installer_app.desktop_shortcut = original_desktop_shortcut  # type: ignore[assignment]
+                installer_app.start_menu_dir = original_start_menu_dir  # type: ignore[assignment]
+
+            self.assertEqual(target, install_dir / "PC Optimizer Lite.exe")
+            self.assertEqual(target.read_bytes(), b"new exe")
+            self.assertTrue((install_dir / "_internal" / "python312.dll").exists())
+            self.assertFalse((install_dir / "PC Optimizer Lite_new.exe").exists())
+            self.assertFalse((install_dir / "apply_pc_optimizer_lite_update.ps1").exists())
 
 
 class SleepManagerTests(unittest.TestCase):

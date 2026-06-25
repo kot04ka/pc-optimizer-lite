@@ -55,6 +55,10 @@ def stop_installed_copy(target_exe: Path) -> None:
         try:
             if Path(proc.info.get("exe") or "") == target_exe:
                 proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except (psutil.TimeoutExpired, psutil.NoSuchProcess):
+                    proc.kill()
         except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
             continue
 
@@ -130,7 +134,7 @@ def register_uninstall(target_dir: Path, target_exe: Path, uninstall_script: Pat
     """Register the app in the current user's Add/Remove Programs list."""
 
     subkey = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\PC Optimizer Lite"
-    estimated_size = max(1, int(target_exe.stat().st_size / 1024))
+    estimated_size = max(1, int(sum(path.stat().st_size for path in target_dir.rglob("*") if path.is_file()) / 1024))
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, subkey) as key:
         values = {
             "DisplayName": APP_NAME,
@@ -149,10 +153,16 @@ def register_uninstall(target_dir: Path, target_exe: Path, uninstall_script: Pat
         winreg.SetValueEx(key, "NoRepair", 0, winreg.REG_DWORD, 1)
 
 
-def perform_install(create_desktop: bool, autostart: bool) -> Path:
+def perform_install(create_desktop: bool, autostart: bool, *, remove_desktop_when_unchecked: bool = True) -> Path:
     """Install the application for the current user."""
 
-    source_exe = resource_path("payload/PC Optimizer Lite.exe")
+    payload_root = resource_path("payload")
+    source_exe = payload_root / "PC Optimizer Lite.exe"
+    if not source_exe.exists():
+        nested_payload = payload_root / "PC Optimizer Lite"
+        source_exe = nested_payload / "PC Optimizer Lite.exe"
+        if source_exe.exists():
+            payload_root = nested_payload
     if not source_exe.exists():
         raise FileNotFoundError(source_exe)
 
@@ -160,12 +170,25 @@ def perform_install(create_desktop: bool, autostart: bool) -> Path:
     target_exe = target_dir / "PC Optimizer Lite.exe"
     stop_installed_copy(target_exe)
     target_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_exe, target_exe)
+    for stale in (
+        target_dir / "PC Optimizer Lite_new.exe",
+        target_dir / "apply_pc_optimizer_lite_update.ps1",
+        target_dir / "pc_optimizer_lite_update.log",
+    ):
+        stale.unlink(missing_ok=True)
+    for item in payload_root.iterdir():
+        destination = target_dir / item.name
+        if item.is_dir():
+            if destination.exists():
+                shutil.rmtree(destination)
+            shutil.copytree(item, destination)
+        else:
+            shutil.copy2(item, destination)
 
     create_shortcut(start_menu_dir() / "PC Optimizer Lite.lnk", target_exe)
     if create_desktop:
         create_shortcut(desktop_shortcut(), target_exe)
-    elif desktop_shortcut().exists():
+    elif remove_desktop_when_unchecked and desktop_shortcut().exists():
         desktop_shortcut().unlink()
 
     set_run_value(target_exe, autostart)
@@ -220,6 +243,18 @@ class InstallerWindow(QWidget):
 
 
 def main() -> int:
+    if "--silent" in sys.argv:
+        try:
+            perform_install(
+                create_desktop="--desktop" in sys.argv,
+                autostart="--autostart" in sys.argv,
+                remove_desktop_when_unchecked=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - installer entry point must return a setup error
+            print(f"Installation failed: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
     app = QApplication.instance() or QApplication(sys.argv)
     window = InstallerWindow()
     window.show()
