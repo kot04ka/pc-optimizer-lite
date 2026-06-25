@@ -17,7 +17,8 @@ import psutil
 from .config import AppConfig
 from .history_manager import HistoryManager
 from .monitor import MonitorSnapshot, ProcessInfo
-from .smart_process_manager import get_foreground_pid
+from .process_safety import is_interactive_process, is_known_interactive_process_name
+from .smart_process_manager import get_foreground_pid, get_visible_window_pids
 from .whitelist import Whitelist
 
 LOGGER = logging.getLogger(__name__)
@@ -114,6 +115,10 @@ class CpuThrottler:
             return self.restore_all("CPU responsiveness control disabled") if self._records else []
 
         now = time.monotonic()
+        foreground_pid = get_foreground_pid()
+        restored = self.restore_interactive(foreground_pid=foreground_pid)
+        if restored:
+            return restored
         threshold = float(config.cpu_threshold_percent)
         if snapshot.cpu_percent < max(0.0, threshold - RESTORE_HYSTERESIS_PERCENT):
             self._high_since = None
@@ -166,6 +171,13 @@ class CpuThrottler:
                 continue
             if self.whitelist.is_whitelisted(process.name, process.exe):
                 continue
+            if is_interactive_process(
+                pid=process.pid,
+                name=process.name,
+                has_window=bool(getattr(process, "has_window", False)),
+                is_foreground_related=bool(getattr(process, "is_foreground_related", False)),
+            ):
+                continue
             if not _is_process_info_normal_priority(process.priority):
                 continue
             candidates.append(process)
@@ -175,6 +187,20 @@ class CpuThrottler:
         """Restore every process touched by the responsiveness controller."""
 
         return [self._restore_process(entry, reason) for entry in list(self._records.values())]
+
+    def restore_interactive(
+        self,
+        *,
+        foreground_pid: int | None = None,
+        reason: str = "interactive app focused",
+    ) -> list[ThrottleAction]:
+        """Restore throttled apps as soon as they become interactive again."""
+
+        actions: list[ThrottleAction] = []
+        for entry in list(self._records.values()):
+            if is_interactive_process(pid=entry.pid, name=entry.name, foreground_pid=foreground_pid):
+                actions.append(self._restore_process(entry, reason))
+        return actions
 
     def _capture_baseline(self, now: float) -> None:
         """Capture process CPU times only after sustained total CPU pressure."""
@@ -202,7 +228,8 @@ class CpuThrottler:
     def _apply_to_current_culprit(self, config: AppConfig, elapsed: float) -> ThrottleAction | None:
         foreground_pid = get_foreground_pid()
         foreground_related = _foreground_related_pids(foreground_pid)
-        candidates = self._collect_culprits(config, elapsed, foreground_related)
+        visible_pids = get_visible_window_pids()
+        candidates = self._collect_culprits(config, elapsed, foreground_related, visible_pids)
         for candidate in candidates[:8]:
             if _has_realtime_hint(candidate.name):
                 continue
@@ -218,6 +245,7 @@ class CpuThrottler:
         config: AppConfig,
         elapsed: float,
         foreground_related: set[int],
+        visible_pids: set[int],
     ) -> list[_Candidate]:
         candidates: list[_Candidate] = []
         min_process_cpu = float(config.cpu_optimizer_min_process_cpu_percent)
@@ -226,7 +254,7 @@ class CpuThrottler:
             try:
                 info = proc.info
                 pid = int(info.get("pid") or proc.pid)
-                if pid == self._own_pid or pid in self._records or pid in foreground_related:
+                if pid == self._own_pid or pid in self._records or pid in foreground_related or pid in visible_pids:
                     continue
                 baseline = self._baseline.get(pid)
                 if baseline is None:
@@ -236,6 +264,8 @@ class CpuThrottler:
                     continue
                 name = str(info.get("name") or "")
                 exe = str(info.get("exe") or "")
+                if is_known_interactive_process_name(name):
+                    continue
                 if self.whitelist.is_whitelisted(name, exe):
                     continue
                 priority = _safe_nice(proc)
@@ -266,6 +296,15 @@ class CpuThrottler:
         try:
             if self.whitelist.is_whitelisted(candidate.name, candidate.exe):
                 return ThrottleAction(candidate.pid, candidate.name, "throttle", False, "Process is protected", "warning")
+            if is_interactive_process(pid=candidate.pid, name=candidate.name):
+                return ThrottleAction(
+                    candidate.pid,
+                    candidate.name,
+                    "throttle",
+                    False,
+                    "Process is active or interactive",
+                    "warning",
+                )
             previous_affinity = _safe_affinity(candidate.proc)
             priority_label = _set_priority(candidate.proc, config.cpu_optimizer_priority_mode)
             affinity_detail = ""
@@ -330,7 +369,11 @@ class CpuThrottler:
                 continue
             try:
                 proc = psutil.Process(entry.pid)
-                if self.whitelist.is_whitelisted(entry.name, entry.exe) or _has_active_network(proc):
+                if (
+                    self.whitelist.is_whitelisted(entry.name, entry.exe)
+                    or is_interactive_process(pid=entry.pid, name=entry.name)
+                    or _has_active_network(proc)
+                ):
                     continue
                 proc.suspend()
                 time.sleep(config.cpu_limiter_suspend_milliseconds / 1000.0)

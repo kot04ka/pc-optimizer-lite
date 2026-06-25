@@ -67,6 +67,8 @@ class ProcessInfo:
     memory_percent: float
     memory_rss: int
     priority: str
+    has_window: bool = False
+    is_foreground_related: bool = False
 
 
 @dataclass(slots=True)
@@ -106,13 +108,16 @@ class SystemMonitor:
         interval_seconds: float = 3.0,
         process_refresh_seconds: float = 6.0,
         max_processes: int = 80,
+        startup_grace_seconds: float = 0.0,
     ) -> None:
         self.interval_seconds = max(2.0, float(interval_seconds))
         self.process_refresh_seconds = max(self.interval_seconds, float(process_refresh_seconds))
         self.max_processes = max_processes
+        self.startup_grace_seconds = max(0.0, float(startup_grace_seconds))
         self._callbacks: list[SnapshotCallback] = []
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._started_at = 0.0
         self._last_disk_io: tuple[float, psutil._common.sdiskio] | None = None
         self._last_process_refresh = 0.0
         self._last_processes: list[ProcessInfo] = []
@@ -151,6 +156,7 @@ class SystemMonitor:
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
+        self._started_at = time.monotonic()
         self._thread = threading.Thread(target=self._run, name="pc-optimizer-monitor", daemon=True)
         self._thread.start()
         LOGGER.info("System monitor started with %.1fs interval", self.interval_seconds)
@@ -167,10 +173,7 @@ class SystemMonitor:
         while not self._stop_event.is_set():
             started_at = time.monotonic()
             try:
-                include_processes = (
-                    self.process_collection_enabled
-                    and started_at - self._last_process_refresh >= self.process_refresh_seconds
-                )
+                include_processes = self._should_collect_processes(started_at)
                 snapshot = self.collect_snapshot(include_processes=include_processes)
                 with self._lock:
                     self._last_snapshot = snapshot
@@ -184,6 +187,15 @@ class SystemMonitor:
 
             elapsed = time.monotonic() - started_at
             self._stop_event.wait(max(0.25, self.interval_seconds - elapsed))
+
+    def _should_collect_processes(self, now: float) -> bool:
+        """Return True when process-table refresh is enabled and past startup grace."""
+
+        if not self.process_collection_enabled:
+            return False
+        if self._started_at and now - self._started_at < self.startup_grace_seconds:
+            return False
+        return now - self._last_process_refresh >= self.process_refresh_seconds
 
     def collect_snapshot(self, include_processes: bool = False) -> MonitorSnapshot:
         """Collect one system snapshot without blocking the GUI thread."""
@@ -223,14 +235,17 @@ class SystemMonitor:
         """Return processes sorted by CPU and memory usage."""
 
         processes: list[ProcessInfo] = []
+        visible_pids = _get_visible_window_pids()
+        foreground_related = _get_foreground_related_pids()
         attrs = ("pid", "name", "exe", "username", "status", "memory_percent", "memory_info")
         for proc in psutil.process_iter(attrs=attrs):
             try:
                 info = proc.info
+                pid = int(info.get("pid") or proc.pid)
                 memory_info = info.get("memory_info")
                 processes.append(
                     ProcessInfo(
-                        pid=int(info.get("pid") or proc.pid),
+                        pid=pid,
                         name=str(info.get("name") or ""),
                         exe=str(info.get("exe") or ""),
                         username=str(info.get("username") or ""),
@@ -239,6 +254,8 @@ class SystemMonitor:
                         memory_percent=float(info.get("memory_percent") or 0.0),
                         memory_rss=int(getattr(memory_info, "rss", 0) or 0),
                         priority=self._get_priority_label(proc),
+                        has_window=pid in visible_pids,
+                        is_foreground_related=pid in foreground_related,
                     )
                 )
             except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
@@ -298,3 +315,36 @@ class SystemMonitor:
         except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
             return "n/a"
         return str(value)
+
+
+def _get_visible_window_pids() -> set[int]:
+    try:
+        from .smart_process_manager import get_visible_window_pids
+
+        return get_visible_window_pids()
+    except Exception:
+        LOGGER.debug("Failed to collect visible window PIDs", exc_info=True)
+        return set()
+
+
+def _get_foreground_related_pids() -> set[int]:
+    try:
+        from .smart_process_manager import get_foreground_pid
+
+        foreground_pid = get_foreground_pid()
+    except Exception:
+        LOGGER.debug("Failed to collect foreground PID", exc_info=True)
+        return set()
+    if not foreground_pid:
+        return set()
+    related = {foreground_pid}
+    try:
+        active = psutil.Process(foreground_pid)
+        related.update(child.pid for child in active.children(recursive=True))
+        parent = active.parent()
+        while parent is not None:
+            related.add(parent.pid)
+            parent = parent.parent()
+    except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+        related.add(foreground_pid)
+    return related
