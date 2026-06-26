@@ -91,11 +91,34 @@ begin
   );
 end;
 
+procedure CleanupOldUpdaterArtifacts();
+var
+  ProgramsDir: string;
+begin
+  ProgramsDir := ExtractFileDir(ExpandConstant('{app}'));
+  RunHiddenPowerShell(
+    '$ErrorActionPreference = ''SilentlyContinue''; ' +
+    '$dir = ' + PowerShellQuote(ProgramsDir) + '; ' +
+    'Get-ChildItem -LiteralPath $dir -Directory -Filter ''PC Optimizer Lite.update.*'' -ErrorAction SilentlyContinue | ' +
+    'ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }; ' +
+    'Get-ChildItem -LiteralPath $dir -File -Filter ''pc_optimizer_lite_update_*.log'' -ErrorAction SilentlyContinue | ' +
+    'ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }; ' +
+    'Remove-Item -LiteralPath (Join-Path $env:TEMP ''pc_optimizer_lite_update'') -Recurse -Force -ErrorAction SilentlyContinue'
+  );
+end;
+
+procedure CleanupLegacyRegistryEntries();
+begin
+  RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\PC Optimizer Lite');
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then begin
     StopInstalledApp();
     CleanupStalePyInstallerTemp();
+    CleanupOldUpdaterArtifacts();
+    CleanupLegacyRegistryEntries();
   end;
   if CurStep = ssPostInstall then begin
     CleanupStalePyInstallerTemp();

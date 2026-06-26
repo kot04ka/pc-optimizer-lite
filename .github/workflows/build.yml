@@ -32,20 +32,24 @@ jobs:
       - name: Prepare release notes
         shell: powershell
         run: |
+          $tag = $env:GITHUB_REF_NAME
+          $version = $tag.TrimStart('v')
           $onedirZip = "installer_output\PC-Optimizer-Lite-windows-x64.zip"
           $setup = "installer_output\PC-Optimizer-Lite-Setup.exe"
           $onedirHash = (Get-FileHash -LiteralPath $onedirZip -Algorithm SHA256).Hash.ToLowerInvariant()
           $setupHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          # Extract changelog entry for this version from README.md
+          $readmeContent = Get-Content 'README.md' -Raw -Encoding UTF8
+          $escapedVersion = [regex]::Escape($version)
+          $pattern = "(?sm)^###\s+$escapedVersion\s*`$\r?\n(.*?)(?=\r?\n^###\s|\Z)"
+          $match = [regex]::Match($readmeContent, $pattern)
+          if ($match.Success) {
+            $changelog = $match.Groups[1].Value.Trim()
+          } else {
+            $changelog = "PC Optimizer Lite $tag"
+          }
           $notes = @(
-            "Hot-fix: fixed the PC Optimizer Lite auto-update loop by switching updates to the Inno Setup installer.",
-            "",
-            "Changes:",
-            "- Main distribution is now an onedir folder installed by Inno Setup.",
-            "- Auto-update downloads PC-Optimizer-Lite-Setup.exe, verifies size and SHA256, launches it from TEMP with /VERYSILENT /SUPPRESSMSGBOXES /NORESTART, and exits immediately.",
-            "- Removed the self-replacement PowerShell script and in-app folder rename/move updater.",
-            "- Inno Setup closes/restarts the app with CloseApplications=yes and RestartApplications=yes.",
-            "- Users stuck on 1.3.8 must install this release manually once with PC-Optimizer-Lite-Setup.exe; later auto-updates use the fixed installer flow.",
-            "- Windows Defender and other system protection settings are not changed.",
+            $changelog,
             "",
             "PC-Optimizer-Lite-windows-x64.zip sha256: $onedirHash",
             "PC-Optimizer-Lite-Setup.exe sha256: $setupHash"
@@ -73,4 +77,5 @@ jobs:
               "installer_output\PC-Optimizer-Lite-windows-x64.zip#PC-Optimizer-Lite-windows-x64.zip" `
               "installer_output\PC-Optimizer-Lite-Setup.exe#PC-Optimizer-Lite-Setup.exe" `
               --clobber
+            gh release edit $tag --notes-file RELEASE_NOTES.md
           }

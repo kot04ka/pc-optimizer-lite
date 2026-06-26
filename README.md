@@ -84,29 +84,14 @@ python main.py
 
 Дата сборки: `2026-06-26`
 
-Onedir ZIP:
+Артефакты локальной сборки (`.\build.bat`) находятся в:
 
 ```text
-C:\Users\1\Documents\CleenChile\installer_output\PC-Optimizer-Lite-windows-x64.zip
+installer_output\PC-Optimizer-Lite-windows-x64.zip
+installer_output\PC-Optimizer-Lite-Setup.exe
 ```
 
-SHA256:
-
-```text
-92547F9C447EE5706E75B5FB0D615B7120B8549D5F7592F7035989AFAA01F22E
-```
-
-Установщик:
-
-```text
-C:\Users\1\Documents\CleenChile\installer_output\PC-Optimizer-Lite-Setup.exe
-```
-
-SHA256:
-
-```text
-48A25482FB61E6A03915E93893D4C8FCE738D7BE1CEB17C81BF3B477632F0914
-```
+> **Важно:** SHA256-хэши, публикуемые на GitHub Releases, отличаются от хэшей локальной сборки — PyInstaller не даёт воспроизводимых бинарников. Авторитетные хэши для проверки скачанного файла всегда берутся из тела GitHub Release (туда их записывает CI-workflow).
 
 Команда пересборки с нуля из корня проекта:
 
