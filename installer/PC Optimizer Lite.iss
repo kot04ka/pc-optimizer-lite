@@ -20,6 +20,8 @@ PrivilegesRequired=lowest
 SetupIconFile=..\assets\pc_optimizer_lite.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 WizardStyle=modern
+CloseApplications=yes
+RestartApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -32,6 +34,7 @@ Name: "autostart"; Description: "Start PC Optimizer Lite with Windows (tray mode
 Source: "..\dist\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
+Type: filesandordirs; Name: "{app}\*"
 Type: files; Name: "{app}\PC Optimizer Lite_new.exe"
 Type: files; Name: "{app}\apply_pc_optimizer_lite_update.ps1"
 Type: files; Name: "{app}\pc_optimizer_lite_update.log"
@@ -45,6 +48,59 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+function PowerShellQuote(Value: string): string;
+begin
+  StringChangeEx(Value, '''', '''''', True);
+  Result := '''' + Value + '''';
+end;
+
+procedure RunHiddenPowerShell(Command: string);
+var
+  ResultCode: Integer;
+begin
+  Exec(
+    'powershell.exe',
+    '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "' + Command + '"',
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  );
+end;
+
+procedure StopInstalledApp();
+var
+  TargetExe: string;
+begin
+  TargetExe := ExpandConstant('{app}\{#MyAppExeName}');
+  RunHiddenPowerShell(
+    '$target = ' + PowerShellQuote(TargetExe) + '; ' +
+    'Get-Process -ErrorAction SilentlyContinue | ForEach-Object { ' +
+    'try { if ($_.Path -and [string]::Equals($_.Path, $target, [StringComparison]::OrdinalIgnoreCase)) { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } } catch { } }'
+  );
+end;
+
+procedure CleanupStalePyInstallerTemp();
+begin
+  RunHiddenPowerShell(
+    '$ErrorActionPreference = ''SilentlyContinue''; ' +
+    'Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter ''_MEI*'' -ErrorAction SilentlyContinue | ' +
+    'ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }'
+  );
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssInstall then begin
+    StopInstalledApp();
+    CleanupStalePyInstallerTemp();
+  end;
+  if CurStep = ssPostInstall then begin
+    CleanupStalePyInstallerTemp();
+  end;
+end;
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch PC Optimizer Lite"; Flags: nowait postinstall skipifsilent

@@ -21,6 +21,10 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --no-progress -y
+
       - name: Build app
         shell: powershell
         run: .\build.bat
@@ -28,22 +32,21 @@ jobs:
       - name: Prepare release notes
         shell: powershell
         run: |
-          $portable = "dist\PC Optimizer Lite.exe"
+          $onedirZip = "installer_output\PC-Optimizer-Lite-windows-x64.zip"
           $setup = "installer_output\PC-Optimizer-Lite-Setup.exe"
-          $portableHash = (Get-FileHash -LiteralPath $portable -Algorithm SHA256).Hash.ToLowerInvariant()
+          $onedirHash = (Get-FileHash -LiteralPath $onedirZip -Algorithm SHA256).Hash.ToLowerInvariant()
           $setupHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
           $notes = @(
-            "Hot-fix: fixed input lag in Telegram, Discord, browsers, editors, and other interactive apps while the optimizer is running.",
+            "Hot-fix: switched PC Optimizer Lite to onedir packaging and made sleep mode safe for windowed apps.",
             "",
             "Changes:",
-            "- CPU priority/affinity relief now skips the active window, visible interactive apps, and known messengers/browsers/editors.",
-            "- Previously applied CPU limits are restored immediately when the user focuses the affected app.",
-            "- Startup is softer: monitoring starts after a delay, the first heavy process-table refresh is deferred, and update checks no longer start together with the GUI.",
-            "- Confirmed: no global keyboard/mouse hooks are used; user activity is checked with GetLastInputInfo().",
+            "- Main distribution is now an onedir folder installed by Inno Setup.",
+            "- Auto-update downloads the onedir ZIP, verifies size and SHA256 before applying it, and replaces the whole app directory after the old process exits.",
+            "- Old files from previous versions are removed instead of being copied over.",
+            "- Sleep mode now uses priority sleep for visible/data-risk apps, keeps deep suspend for headless-safe candidates, and wakes via foreground/cursor polling.",
+            "- Windows Defender and other system protection settings are not changed.",
             "",
-            "PC-Optimizer-Lite.exe sha256: $portableHash",
-            "PC.Optimizer.Lite.exe sha256: $portableHash",
-            "PC Optimizer Lite.exe sha256: $portableHash",
+            "PC-Optimizer-Lite-windows-x64.zip sha256: $onedirHash",
             "PC-Optimizer-Lite-Setup.exe sha256: $setupHash"
           ) -join [Environment]::NewLine
           $notes | Set-Content -LiteralPath RELEASE_NOTES.md -Encoding UTF8
@@ -60,13 +63,13 @@ jobs:
           $ErrorActionPreference = "Stop"
           if (-not $releaseExists) {
             gh release create $tag `
-              "dist\PC Optimizer Lite.exe#PC-Optimizer-Lite.exe" `
+              "installer_output\PC-Optimizer-Lite-windows-x64.zip#PC-Optimizer-Lite-windows-x64.zip" `
               "installer_output\PC-Optimizer-Lite-Setup.exe#PC-Optimizer-Lite-Setup.exe" `
               --title "PC Optimizer Lite $tag" `
               --notes-file RELEASE_NOTES.md
           } else {
             gh release upload $tag `
-              "dist\PC Optimizer Lite.exe#PC-Optimizer-Lite.exe" `
+              "installer_output\PC-Optimizer-Lite-windows-x64.zip#PC-Optimizer-Lite-windows-x64.zip" `
               "installer_output\PC-Optimizer-Lite-Setup.exe#PC-Optimizer-Lite-Setup.exe" `
               --clobber
           }

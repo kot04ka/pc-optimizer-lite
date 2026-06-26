@@ -6,6 +6,7 @@ import datetime as _dt
 import os
 import shutil
 import sys
+import tempfile
 import winreg
 from pathlib import Path
 
@@ -28,7 +29,7 @@ APP_NAME = "PC Optimizer Lite"
 
 
 def resource_path(relative: str) -> Path:
-    """Return a payload path both from source and PyInstaller onefile mode."""
+    """Return a payload path both from source and packaged setup mode."""
 
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     return base / relative
@@ -61,6 +62,47 @@ def stop_installed_copy(target_exe: Path) -> None:
                     proc.kill()
         except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
             continue
+
+
+def cleanup_pyinstaller_temp(temp_root: Path | None = None) -> None:
+    """Best-effort cleanup for stale PyInstaller extraction folders."""
+
+    root = temp_root or Path(tempfile.gettempdir())
+    if not root.exists():
+        return
+    for candidate in root.glob("_MEI*"):
+        if not candidate.is_dir():
+            continue
+        shutil.rmtree(candidate, ignore_errors=True)
+
+
+def replace_install_tree(source_dir: Path, target_dir: Path) -> None:
+    """Replace the installed onedir tree instead of copying over old files."""
+
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    old_dir = _available_sibling_path(target_dir.with_name(f"{target_dir.name}.old"))
+    if target_dir.exists():
+        target_dir.rename(old_dir)
+    try:
+        shutil.copytree(source_dir, target_dir)
+    except Exception:
+        if target_dir.exists():
+            shutil.rmtree(target_dir, ignore_errors=True)
+        if old_dir.exists() and not target_dir.exists():
+            old_dir.rename(target_dir)
+        raise
+    if old_dir.exists():
+        shutil.rmtree(old_dir, ignore_errors=True)
+
+
+def _available_sibling_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    for index in range(1, 100):
+        candidate = path.with_name(f"{path.name}.{index}")
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError(f"No available backup path near {path}")
 
 
 def create_shortcut(path: Path, target: Path, args: str = "") -> None:
@@ -169,21 +211,8 @@ def perform_install(create_desktop: bool, autostart: bool, *, remove_desktop_whe
     target_dir = install_dir()
     target_exe = target_dir / "PC Optimizer Lite.exe"
     stop_installed_copy(target_exe)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    for stale in (
-        target_dir / "PC Optimizer Lite_new.exe",
-        target_dir / "apply_pc_optimizer_lite_update.ps1",
-        target_dir / "pc_optimizer_lite_update.log",
-    ):
-        stale.unlink(missing_ok=True)
-    for item in payload_root.iterdir():
-        destination = target_dir / item.name
-        if item.is_dir():
-            if destination.exists():
-                shutil.rmtree(destination)
-            shutil.copytree(item, destination)
-        else:
-            shutil.copy2(item, destination)
+    cleanup_pyinstaller_temp()
+    replace_install_tree(payload_root, target_dir)
 
     create_shortcut(start_menu_dir() / "PC Optimizer Lite.lnk", target_exe)
     if create_desktop:

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import psutil
 
 from .history_manager import HistoryManager
+from .safety.activity_detector import choose_sleep_strategy, get_cursor_window_pid, get_window_titles_by_pid
 from .smart_process_manager import get_foreground_pid, get_visible_window_pids, is_related_to_pid
 from .whitelist import Whitelist
 
@@ -41,6 +42,7 @@ class SleepEntry:
     reason: str
     previous_priority: int | None = None
     suspended: bool = False
+    strategy: str = "suspend"
 
 
 @dataclass(slots=True)
@@ -96,9 +98,17 @@ class SleepManager:
         """Resume a suspended app as soon as Windows reports it as foreground."""
 
         foreground_pid = get_foreground_pid()
-        if foreground_pid and foreground_pid in self._sleeping:
-            return [self.resume_process(foreground_pid, "foreground")]
-        return []
+        return self._resume_for_active_pid(foreground_pid, "foreground")
+
+    def resume_user_target_if_sleeping(self) -> list[SleepAction]:
+        """Resume sleeping apps targeted by focus or by the mouse cursor."""
+
+        actions = self.resume_foreground_if_sleeping()
+        resumed_pids = {action.pid for action in actions if action.success}
+        cursor_pid = get_cursor_window_pid()
+        if cursor_pid and cursor_pid not in resumed_pids:
+            actions.extend(self._resume_for_active_pid(cursor_pid, "cursor"))
+        return actions
 
     def poll(self, enabled: bool, idle_minutes: float, max_actions: int = 2) -> list[SleepAction]:
         """Update focus state, resume focused apps, and sleep eligible inactive apps."""
@@ -112,8 +122,7 @@ class SleepManager:
         if foreground_pid:
             self._update_usage_metadata(foreground_pid)
             self._last_focus_by_pid[foreground_pid] = now
-            if foreground_pid in self._sleeping:
-                actions.append(self.resume_process(foreground_pid, "foreground"))
+            actions.extend(self._resume_for_active_pid(foreground_pid, "foreground"))
 
         for pid in visible_pids:
             self._last_focus_by_pid.setdefault(pid, now)
@@ -131,13 +140,24 @@ class SleepManager:
                 continue
             if self._is_recently_reused(pid, now, idle_minutes):
                 continue
-            action = self.sleep_process(pid, f"Inactive for {idle_minutes:.0f}+ min")
+            action = self.sleep_process(
+                pid,
+                f"Inactive for {idle_minutes:.0f}+ min",
+                has_visible_window=pid in visible_pids,
+            )
             if action:
                 actions.append(action)
         return actions
 
-    def sleep_process(self, pid: int, reason: str) -> SleepAction | None:
-        """Set process to idle priority and suspend it if safety checks pass."""
+    def sleep_process(
+        self,
+        pid: int,
+        reason: str,
+        *,
+        has_visible_window: bool | None = None,
+        window_title: str = "",
+    ) -> SleepAction | None:
+        """Apply the selected sleep strategy after safety checks pass."""
 
         try:
             proc = psutil.Process(pid)
@@ -145,30 +165,49 @@ class SleepManager:
             exe = _safe_exe(proc)
             if not self._is_sleep_safe(proc, name, exe):
                 return None
+            if has_visible_window is None:
+                has_visible_window = pid in get_visible_window_pids()
+            if has_visible_window and not window_title:
+                window_title = get_window_titles_by_pid({pid}).get(pid, "")
+            decision = choose_sleep_strategy(
+                name=name,
+                has_visible_window=bool(has_visible_window),
+                window_title=window_title,
+            )
             previous_priority = _safe_nice(proc)
             if os.name == "nt":
                 proc.nice(psutil.IDLE_PRIORITY_CLASS)
             else:
                 proc.nice(19)
             suspended = False
-            try:
-                proc.suspend()
-                suspended = True
-            except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
-                suspended = False
+            if decision.strategy == "suspend":
+                try:
+                    proc.suspend()
+                    suspended = True
+                except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+                    suspended = False
+            sleep_reason = _combine_reason(reason, decision.reason)
             entry = SleepEntry(
                 pid=pid,
                 name=name,
                 exe=exe,
                 slept_at=time.time(),
-                reason=reason,
+                reason=sleep_reason,
                 previous_priority=previous_priority,
                 suspended=suspended,
+                strategy=decision.strategy,
             )
             self._sleeping[pid] = entry
-            self.history.add_event("sleep", f"Slept {name}", reason, "info")
-            LOGGER.info("Slept pid=%s name=%s suspended=%s reason=%s", pid, name, suspended, reason)
-            return SleepAction(pid, name, "sleep", True, reason)
+            self.history.add_event("sleep", f"Slept {name}", sleep_reason, "info")
+            LOGGER.info(
+                "Slept pid=%s name=%s strategy=%s suspended=%s reason=%s",
+                pid,
+                name,
+                decision.strategy,
+                suspended,
+                sleep_reason,
+            )
+            return SleepAction(pid, name, "sleep", True, sleep_reason)
         except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess) as exc:
             LOGGER.debug("Sleep skipped for pid=%s: %s", pid, exc)
             return SleepAction(pid, str(pid), "sleep", False, str(exc))
@@ -180,6 +219,9 @@ class SleepManager:
         exe: str,
         previous_priority: int | None,
         reason: str,
+        *,
+        has_visible_window: bool = False,
+        window_title: str = "",
     ) -> SleepAction | None:
         """Sleep a process already vetted by a shared optimization snapshot."""
 
@@ -190,6 +232,11 @@ class SleepManager:
         if self.whitelist.is_whitelisted(name, exe):
             return None
         try:
+            decision = choose_sleep_strategy(
+                name=name,
+                has_visible_window=has_visible_window,
+                window_title=window_title,
+            )
             proc = psutil.Process(pid)
             if previous_priority is None:
                 previous_priority = _safe_nice(proc)
@@ -198,24 +245,34 @@ class SleepManager:
             else:
                 proc.nice(19)
             suspended = False
-            try:
-                proc.suspend()
-                suspended = True
-            except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
-                suspended = False
+            if decision.strategy == "suspend":
+                try:
+                    proc.suspend()
+                    suspended = True
+                except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+                    suspended = False
+            sleep_reason = _combine_reason(reason, decision.reason)
             entry = SleepEntry(
                 pid=pid,
                 name=name,
                 exe=exe,
                 slept_at=time.time(),
-                reason=reason,
+                reason=sleep_reason,
                 previous_priority=previous_priority,
                 suspended=suspended,
+                strategy=decision.strategy,
             )
             self._sleeping[pid] = entry
-            self.history.add_event("sleep", f"Slept {name}", reason, "info")
-            LOGGER.info("Slept from snapshot pid=%s name=%s suspended=%s reason=%s", pid, name, suspended, reason)
-            return SleepAction(pid, name, "sleep", True, reason)
+            self.history.add_event("sleep", f"Slept {name}", sleep_reason, "info")
+            LOGGER.info(
+                "Slept from snapshot pid=%s name=%s strategy=%s suspended=%s reason=%s",
+                pid,
+                name,
+                decision.strategy,
+                suspended,
+                sleep_reason,
+            )
+            return SleepAction(pid, name, "sleep", True, sleep_reason)
         except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess) as exc:
             LOGGER.debug("Snapshot sleep skipped for pid=%s: %s", pid, exc)
             return SleepAction(pid, name or str(pid), "sleep", False, str(exc))
@@ -223,7 +280,7 @@ class SleepManager:
     def resume_process(self, pid: int, reason: str = "manual") -> SleepAction:
         """Resume a sleeping process and restore normal priority."""
 
-        entry = self._sleeping.pop(pid, None)
+        entry = self._sleeping.get(pid)
         try:
             proc = psutil.Process(pid)
             name = proc.name()
@@ -233,12 +290,33 @@ class SleepManager:
                 proc.nice(psutil.NORMAL_PRIORITY_CLASS)
             elif entry and entry.previous_priority is not None:
                 proc.nice(entry.previous_priority)
+            self._sleeping.pop(pid, None)
             self.history.add_event("wake", f"Woke {name}", reason, "success")
             LOGGER.info("Resumed pid=%s name=%s reason=%s", pid, name, reason)
             return SleepAction(pid, name, "wake", True, reason)
-        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess) as exc:
+        except (psutil.NoSuchProcess, psutil.ZombieProcess) as exc:
+            self._sleeping.pop(pid, None)
+            LOGGER.warning("Resume skipped for missing pid=%s: %s", pid, exc)
+            return SleepAction(pid, entry.name if entry else str(pid), "wake", False, str(exc))
+        except psutil.AccessDenied as exc:
             LOGGER.warning("Resume failed for pid=%s: %s", pid, exc)
             return SleepAction(pid, entry.name if entry else str(pid), "wake", False, str(exc))
+
+    def _resume_for_active_pid(self, active_pid: int | None, reason: str) -> list[SleepAction]:
+        if not active_pid:
+            return []
+        wake_pids: list[int] = []
+        if active_pid in self._sleeping:
+            wake_pids.append(active_pid)
+        for pid in list(self._sleeping):
+            if pid == active_pid:
+                continue
+            if is_related_to_pid(pid, active_pid):
+                wake_pids.append(pid)
+        return [
+            self.resume_process(pid, reason if pid == active_pid else f"{reason} related")
+            for pid in wake_pids
+        ]
 
     def _is_sleep_safe(self, proc: psutil.Process, name: str, exe: str) -> bool:
         if proc.pid == self._own_pid:
@@ -327,3 +405,9 @@ def _safe_nice(proc: psutil.Process) -> int | None:
         return int(proc.nice())
     except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess, ValueError):
         return None
+
+
+def _combine_reason(reason: str, policy_reason: str) -> str:
+    if not policy_reason:
+        return reason
+    return f"{reason}; {policy_reason}"

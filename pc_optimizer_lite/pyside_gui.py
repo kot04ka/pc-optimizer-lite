@@ -52,6 +52,8 @@ from .config import (
     AppConfig,
     apply_automation_mode,
     apply_optimal_preset,
+    export_config,
+    import_config,
     save_config,
 )
 from .cpu_optimizer import CpuOptimizer
@@ -79,6 +81,7 @@ LOGGER = logging.getLogger(__name__)
 STARTUP_MONITOR_DELAY_MS = 1200
 STARTUP_LITE_PROMPT_DELAY_MS = 2500
 STARTUP_UPDATE_CHECK_DELAY_MS = 8000
+SLEEP_WAKE_POLL_MS = 500
 
 
 THEMES = {
@@ -753,6 +756,9 @@ class PCOptimizerQtWindow(QMainWindow):
         self.activity_timer = QTimer(self)
         self.activity_timer.timeout.connect(self.refresh_activity)
         self.activity_timer.start(15000)
+        self.sleep_wake_timer = QTimer(self)
+        self.sleep_wake_timer.timeout.connect(self._poll_sleep_wake_only)
+        self.sleep_wake_timer.start(SLEEP_WAKE_POLL_MS)
         self._apply_runtime_performance_mode()
         QTimer.singleShot(STARTUP_LITE_PROMPT_DELAY_MS, self._maybe_offer_lite_mode)
         QTimer.singleShot(STARTUP_UPDATE_CHECK_DELAY_MS, self._maybe_check_updates_on_startup)
@@ -1087,13 +1093,19 @@ class PCOptimizerQtWindow(QMainWindow):
         self.automation_mode_combo.setCurrentIndex(
             {"observation": 0, "manual": 1, "autopilot": 2}.get(self.config.automation_mode, 0)
         )
+        self.automation_mode_combo.setToolTip(
+            "Наблюдение только показывает рекомендации. Ручной режим ждёт ваших действий. "
+            "Автопилот выполняет безопасные авто-действия в фоне."
+        )
         self.automation_mode_combo.currentIndexChanged.connect(lambda *_: self._preview_automation_mode())
 
         self.observation_only_check = _toggle("Режим только наблюдения: запретить авто-действия")
         self.observation_only_check.setChecked(self.config.observation_only_mode)
+        self.observation_only_check.setToolTip("Отключает автоматическую RAM-очистку, CPU ProBalance, sleep mode и автоочистку.")
         self.autostart_check = _toggle("Запускать с Windows")
         self.autostart_check.setChecked(is_autostart_enabled())
-        self.lite_mode_check = _toggle("Режим слабого ПК")
+        self.autostart_check.setToolTip("Добавляет или удаляет запуск PC Optimizer Lite при входе в Windows.")
+        self.lite_mode_check = _toggle("Лёгкий режим для слабого ПК")
         self.lite_mode_check.setChecked(self.config.lite_mode_enabled)
         self.lite_mode_check.setToolTip(
             "Увеличивает интервалы опроса, упрощает график и по умолчанию отключает тяжёлые действия."
@@ -1106,27 +1118,43 @@ class PCOptimizerQtWindow(QMainWindow):
         self.ram_threshold_edit = QLineEdit(str(self.config.ram_threshold_percent))
         self.cooldown_edit = QLineEdit(str(self.config.notification_cooldown_seconds))
         self.max_priority_edit = QLineEdit(str(self.config.max_auto_priority_changes))
-        self.auto_priority_check = _toggle("Автоматически понижать priority при критической нагрузке")
+        self.cpu_threshold_edit.setToolTip("Общий CPU, после которого появится предупреждение и может стартовать CPU ProBalance.")
+        self.cpu_sustain_edit.setToolTip("Сколько секунд CPU должен держаться выше порога перед реакцией.")
+        self.ram_threshold_edit.setToolTip("Порог уведомления о высокой RAM. Автоочистка использует отдельный порог ниже.")
+        self.cooldown_edit.setToolTip("Минимальная пауза между одинаковыми уведомлениями и авто-действиями.")
+        self.max_priority_edit.setToolTip("Ограничивает, сколько процессов можно смягчить за один цикл.")
+        self.auto_priority_check = _toggle("Автоматически снижать приоритет тяжёлых процессов")
         self.auto_priority_check.setChecked(self.config.auto_lower_priority_enabled)
+        self.auto_priority_check.setToolTip("Мягкий fallback: снижает priority только у безопасных фоновых кандидатов.")
 
         self.auto_close_combo = QComboBox()
         self.auto_close_combo.addItem("Выключено", "off")
         self.auto_close_combo.addItem("Спрашивать подтверждение", "ask")
         self.auto_close_combo.addItem("Разрешить авто-закрытие", "auto")
         self.auto_close_combo.setCurrentIndex({"off": 0, "ask": 1, "auto": 2}.get(self.config.auto_close_mode, 1))
+        self.auto_close_combo.setToolTip("Автопилот оставляет закрытие выключенным. Включайте только если хотите чистить фоновые зависшие/дублирующиеся процессы.")
         self.close_background_edit = QLineEdit(str(self.config.auto_close_min_background_minutes))
         self.close_cpu_edit = QLineEdit(str(self.config.auto_close_cpu_threshold_percent))
         self.close_ram_edit = QLineEdit(str(self.config.auto_close_memory_threshold_percent))
         self.close_duplicates_edit = QLineEdit(str(self.config.auto_close_duplicate_count))
+        self.close_background_edit.setToolTip("Процесс должен быть без видимого окна не меньше этого времени.")
+        self.close_cpu_edit.setToolTip("Кандидат на закрытие должен быть не ниже этого CPU-порога.")
+        self.close_ram_edit.setToolTip("Кандидат на закрытие должен быть не ниже этого RAM-порога.")
+        self.close_duplicates_edit.setToolTip("Сколько копий одного процесса должно быть найдено перед проверкой дублей.")
 
-        self.sleep_enabled_check = _toggle("Разрешить режим сна для неактивных приложений")
+        self.sleep_enabled_check = _toggle("Мягко усыплять давно неактивные окна")
         self.sleep_enabled_check.setChecked(self.config.sleep_enabled)
         self.sleep_after_edit = QLineEdit(str(self.config.sleep_after_minutes))
         self.sleep_check_edit = QLineEdit(str(self.config.sleep_check_seconds))
-        self.ram_auto_clean_check = _toggle("Авто-очистка RAM лёгким режимом при превышении порога")
+        self.sleep_enabled_check.setToolTip("Оконные приложения получают priority sleep; deep suspend используется только для безопасных headless-кандидатов.")
+        self.sleep_after_edit.setToolTip("Сколько минут окно должно быть неактивным перед sleep mode.")
+        self.sleep_check_edit.setToolTip("Как часто проверять кандидатов и пробуждать окно под курсором/фокусом.")
+        self.ram_auto_clean_check = _toggle("Автоматически чистить RAM лёгким режимом")
         self.ram_auto_clean_check.setChecked(self.config.ram_auto_clean_enabled)
         self.ram_auto_threshold_edit = QLineEdit(str(self.config.ram_auto_clean_threshold_percent))
-        self.cpu_optimizer_check = _toggle("Включить мягкую CPU-защиту интерфейса")
+        self.ram_auto_clean_check.setToolTip("Без закрытия приложений: просит Windows выгрузить неиспользуемые страницы памяти.")
+        self.ram_auto_threshold_edit.setToolTip("RAM-порог, после которого запускается лёгкая автоочистка.")
+        self.cpu_optimizer_check = _toggle("CPU ProBalance: снижать влияние тяжёлых процессов")
         self.cpu_optimizer_check.setChecked(self.config.cpu_optimizer_enabled)
         self.cpu_optimizer_priority_combo = QComboBox()
         self.cpu_optimizer_priority_combo.addItem("Ниже обычного", "below_normal")
@@ -1134,23 +1162,33 @@ class PCOptimizerQtWindow(QMainWindow):
         self.cpu_optimizer_priority_combo.setCurrentIndex(
             {"below_normal": 0, "idle": 1}.get(self.config.cpu_optimizer_priority_mode, 0)
         )
+        self.cpu_optimizer_check.setToolTip("Временно снижает priority/affinity у безопасных фоновых процессов и затем восстанавливает.")
         self.cpu_optimizer_min_cpu_edit = QLineEdit(str(self.config.cpu_optimizer_min_process_cpu_percent))
         self.cpu_optimizer_max_edit = QLineEdit(str(self.config.cpu_optimizer_max_processes))
         self.cpu_optimizer_affinity_ratio_edit = QLineEdit(str(self.config.cpu_optimizer_affinity_ratio))
         self.cpu_optimizer_min_cores_edit = QLineEdit(str(self.config.cpu_optimizer_affinity_min_cores))
         self.cpu_optimizer_restore_edit = QLineEdit(str(self.config.cpu_optimizer_restore_after_seconds))
-        self.cpu_throttle_check = _toggle("Автоматически вмешиваться при устойчивой CPU-нагрузке")
+        self.cpu_optimizer_min_cpu_edit.setToolTip("Процесс должен использовать CPU не ниже этого значения, чтобы попасть в CPU ProBalance.")
+        self.cpu_optimizer_max_edit.setToolTip("Ограничение числа процессов, которые можно смягчить за один проход.")
+        self.cpu_optimizer_affinity_ratio_edit.setToolTip("Доля доступных ядер, которую оставить тяжёлому процессу при affinity-ограничении.")
+        self.cpu_optimizer_min_cores_edit.setToolTip("Нижняя граница ядер, которые всегда остаются процессу.")
+        self.cpu_optimizer_restore_edit.setToolTip("Через сколько секунд вернуть priority/affinity обратно.")
+        self.cpu_throttle_check = _toggle("Автоматически включать CPU ProBalance при устойчивой нагрузке")
         self.cpu_throttle_check.setChecked(self.config.cpu_throttle_enabled)
-        self.cpu_affinity_check = _toggle("Разрешить временно ограничивать ядра процесса")
+        self.cpu_throttle_check.setToolTip("Запускает тихий CPU-relief, когда общий CPU держится выше порога и пользователь не активен.")
+        self.cpu_affinity_check = _toggle("Разрешить временное ограничение ядер")
         self.cpu_affinity_check.setChecked(self.config.cpu_throttle_affinity_enabled)
-        self.cpu_limiter_check = _toggle("Коротко притормаживать тяжёлый процесс, если обычное снижение не помогает")
+        self.cpu_limiter_check = _toggle("Коротко притормаживать процесс, если priority не помогает")
         self.cpu_limiter_check.setChecked(self.config.cpu_limiter_enabled)
-        self.scheduled_cleanup_check = _toggle("Включить автоочистку по расписанию")
+        self.scheduled_cleanup_check = _toggle("Автоочистка temp/cache по расписанию")
         self.scheduled_cleanup_check.setChecked(self.config.scheduled_cleanup_enabled)
         self.scheduled_cleanup_interval_edit = QLineEdit(str(self.config.scheduled_cleanup_interval_minutes))
-        self.scheduled_cleanup_notify_check = _toggle("Тихое уведомление в трее после автоочистки")
+        self.scheduled_cleanup_check.setToolTip("Очищает только заранее известные безопасные temp/cache/log roots.")
+        self.scheduled_cleanup_interval_edit.setToolTip("Минимальный интервал между автоматическими очистками.")
+        self.scheduled_cleanup_notify_check = _toggle("Уведомлять в трее после автоочистки")
         self.scheduled_cleanup_notify_check.setChecked(self.config.scheduled_cleanup_notify)
         self.auto_cleanup_cooldown_edit = QLineEdit(str(self.config.auto_cleanup_cooldown_minutes))
+        self.auto_cleanup_cooldown_edit.setToolTip("Общий кулдаун для автоочистки и пороговых авто-действий.")
         self.cleanup_temp_check = _toggle("Temp текущего пользователя")
         self.cleanup_temp_check.setChecked(self.config.cleanup_temp_enabled)
         self.cleanup_windows_temp_check = _toggle("Windows Temp")
@@ -1164,12 +1202,14 @@ class PCOptimizerQtWindow(QMainWindow):
         self.cleanup_logs_days_edit = QLineEdit(str(self.config.cleanup_logs_older_than_days))
         self.cleanup_recycle_bin_check = _toggle("Корзина Windows (только при явном включении)")
         self.cleanup_recycle_bin_check.setChecked(self.config.cleanup_recycle_bin_enabled)
-        self.periodic_optimization_check = _toggle("Включить периодическую оптимизацию")
+        self.periodic_optimization_check = _toggle("Тихая автооптимизация по интервалу")
         self.periodic_optimization_check.setChecked(self.config.periodic_optimization_enabled)
         self.periodic_interval_edit = QLineEdit(str(self.config.periodic_optimization_interval_minutes))
-        self.periodic_eco_check = _toggle("Облегчённый авторежим")
+        self.periodic_optimization_check.setToolTip("Запускает one-click цикл в фоне только при простое и с учётом кулдаунов.")
+        self.periodic_interval_edit.setToolTip("Минимальная пауза между тихими циклами автооптимизации.")
+        self.periodic_eco_check = _toggle("Использовать облегчённый цикл")
         self.periodic_eco_check.setChecked(self.config.periodic_optimization_eco_mode)
-        self.periodic_notify_check = _toggle("Тихое уведомление в трее после автооптимизации")
+        self.periodic_notify_check = _toggle("Уведомлять в трее после автооптимизации")
         self.periodic_notify_check.setChecked(self.config.periodic_optimization_notify)
         self.optimization_step_checks: dict[str, QCheckBox] = {}
         for key, label, tooltip in (
@@ -1223,12 +1263,12 @@ class PCOptimizerQtWindow(QMainWindow):
 
         close_section, close_form = _settings_section("Умное закрытие процессов", self.palette)
         _form_row(close_form, "Режим закрытия", self.auto_close_combo)
-        _form_row(close_form, "Фон без окна, мин", self.close_background_edit)
-        _form_row(close_form, "CPU процесса для закрытия, %", self.close_cpu_edit)
-        _form_row(close_form, "RAM процесса для закрытия, %", self.close_ram_edit)
-        _form_row(close_form, "Дубликатов процесса до проверки", self.close_duplicates_edit)
+        _form_row(close_form, "Неактивен без окна, мин", self.close_background_edit)
+        _form_row(close_form, "CPU кандидата не ниже, %", self.close_cpu_edit)
+        _form_row(close_form, "RAM кандидата не ниже, %", self.close_ram_edit)
+        _form_row(close_form, "Копий процесса до проверки", self.close_duplicates_edit)
         _form_row(close_form, "", self.auto_priority_check)
-        _form_row(close_form, "Макс. priority-изменений за раз", self.max_priority_edit)
+        _form_row(close_form, "Макс. снижений приоритета за раз", self.max_priority_edit)
         content_layout.addWidget(close_section)
 
         sleep_section, sleep_form = _settings_section("Режим сна", self.palette)
@@ -1280,7 +1320,7 @@ class PCOptimizerQtWindow(QMainWindow):
 
         periodic_section, periodic_form = _settings_section("Автооптимизация", self.palette)
         _form_row(periodic_form, "", self.periodic_optimization_check)
-        _form_row(periodic_form, "Интервал автооптимизации, мин", self.periodic_interval_edit)
+        _form_row(periodic_form, "Минимальный интервал, мин", self.periodic_interval_edit)
         _form_row(periodic_form, "", self.periodic_eco_check)
         _form_row(periodic_form, "", self.periodic_notify_check)
         content_layout.addWidget(periodic_section)
@@ -1308,6 +1348,16 @@ class PCOptimizerQtWindow(QMainWindow):
         footer.setObjectName("SettingsFooter")
         footer_layout = QHBoxLayout(footer)
         footer_layout.setContentsMargins(14, 12, 14, 12)
+        self.import_settings_button = QPushButton("Импортировать настройки")
+        self.import_settings_button.setIcon(_feather_icon("upload", self.palette["accent"]))
+        self.import_settings_button.setToolTip("Загрузить настройки из JSON-файла и сразу применить их.")
+        self.import_settings_button.clicked.connect(self.import_settings_from_file)
+        footer_layout.addWidget(self.import_settings_button)
+        self.export_settings_button = QPushButton("Экспортировать настройки")
+        self.export_settings_button.setIcon(_feather_icon("download", self.palette["accent"]))
+        self.export_settings_button.setToolTip("Сохранить текущие настройки в переносимый JSON-файл.")
+        self.export_settings_button.clicked.connect(self.export_settings_to_file)
+        footer_layout.addWidget(self.export_settings_button)
         footer_layout.addStretch(1)
         self.save_settings_button = QPushButton("Сохранить настройки")
         self.save_settings_button.setIcon(_feather_icon("save", self.palette["bg"]))
@@ -1419,12 +1469,7 @@ class PCOptimizerQtWindow(QMainWindow):
         save_config(self.config)
         self._sync_controls_from_config()
         self.autostart_check.setChecked(autostart_enabled)
-        self.notifier.cooldown_seconds = self.config.notification_cooldown_seconds
-        self.monitor.interval_seconds = self.config.monitor_interval_seconds
-        self.monitor.process_refresh_seconds = self.config.process_refresh_seconds
-        self._foreground_monitor_interval = self.config.monitor_interval_seconds
-        self._foreground_process_interval = self.config.process_refresh_seconds
-        self._apply_runtime_performance_mode()
+        self._apply_config_runtime()
         self.history.add_event(
             "settings",
             "Optimal preset applied",
@@ -1434,9 +1479,25 @@ class PCOptimizerQtWindow(QMainWindow):
         QMessageBox.information(self, "Оптимальные настройки", "Пресет применён и сохранён.")
         self.refresh_activity()
 
+    def _copy_config_values(self, source: AppConfig) -> None:
+        for field_name in AppConfig.__dataclass_fields__:
+            setattr(self.config, field_name, getattr(source, field_name))
+
+    def _apply_config_runtime(self) -> None:
+        self.notifier.cooldown_seconds = self.config.notification_cooldown_seconds
+        self.monitor.interval_seconds = self.config.monitor_interval_seconds
+        self.monitor.process_refresh_seconds = self.config.process_refresh_seconds
+        self._foreground_monitor_interval = self.config.monitor_interval_seconds
+        self._foreground_process_interval = self.config.process_refresh_seconds
+        self._apply_runtime_performance_mode()
+        if not self.isVisible() or self.isMinimized():
+            self._enter_background_mode()
+        self._refresh_tray_state()
+
     def _sync_controls_from_config(self) -> None:
         self._syncing_controls = True
         try:
+            self.theme_combo.setCurrentIndex({"dark": 0, "light": 1}.get(self.config.theme, 0))
             self.automation_mode_combo.setCurrentIndex(
                 {"observation": 0, "manual": 1, "autopilot": 2}.get(self.config.automation_mode, 0)
             )
@@ -1444,12 +1505,22 @@ class PCOptimizerQtWindow(QMainWindow):
             self.auto_priority_check.setChecked(self.config.auto_lower_priority_enabled)
             self.cpu_threshold_edit.setText(str(self.config.cpu_threshold_percent))
             self.cpu_sustain_edit.setText(str(self.config.cpu_sustain_seconds))
+            self.ram_threshold_edit.setText(str(self.config.ram_threshold_percent))
+            self.cooldown_edit.setText(str(self.config.notification_cooldown_seconds))
             self.lite_mode_check.setChecked(self.config.lite_mode_enabled)
             self.interval_edit.setText(str(self.config.monitor_interval_seconds))
             self.process_interval_edit.setText(str(self.config.process_refresh_seconds))
             self.auto_close_combo.setCurrentIndex({"off": 0, "ask": 1, "auto": 2}.get(self.config.auto_close_mode, 0))
+            self.close_background_edit.setText(str(self.config.auto_close_min_background_minutes))
+            self.close_cpu_edit.setText(str(self.config.auto_close_cpu_threshold_percent))
+            self.close_ram_edit.setText(str(self.config.auto_close_memory_threshold_percent))
+            self.close_duplicates_edit.setText(str(self.config.auto_close_duplicate_count))
+            self.max_priority_edit.setText(str(self.config.max_auto_priority_changes))
             self.sleep_enabled_check.setChecked(self.config.sleep_enabled)
+            self.sleep_after_edit.setText(str(self.config.sleep_after_minutes))
+            self.sleep_check_edit.setText(str(self.config.sleep_check_seconds))
             self.ram_auto_clean_check.setChecked(self.config.ram_auto_clean_enabled)
+            self.ram_auto_threshold_edit.setText(str(self.config.ram_auto_clean_threshold_percent))
             self.cpu_optimizer_check.setChecked(self.config.cpu_optimizer_enabled)
             self.cpu_optimizer_priority_combo.setCurrentIndex(
                 {"below_normal": 0, "idle": 1}.get(self.config.cpu_optimizer_priority_mode, 0)
@@ -1518,6 +1589,10 @@ class PCOptimizerQtWindow(QMainWindow):
         self.graph.set_palette(self.palette)
         if hasattr(self, "save_settings_button"):
             self.save_settings_button.setIcon(_feather_icon("save", self.palette["bg"]))
+        if hasattr(self, "import_settings_button"):
+            self.import_settings_button.setIcon(_feather_icon("upload", self.palette["accent"]))
+        if hasattr(self, "export_settings_button"):
+            self.export_settings_button.setIcon(_feather_icon("download", self.palette["accent"]))
         if hasattr(self, "check_updates_button"):
             version = self._pending_update.latest_version if self._pending_update else ""
             self._set_update_action_state(self._update_action_mode, version)
@@ -2150,6 +2225,14 @@ class PCOptimizerQtWindow(QMainWindow):
         self._last_sleep_poll_at = now
         self._poll_sleep_manager()
 
+    def _poll_sleep_wake_only(self) -> None:
+        actions = self.sleep_manager.resume_user_target_if_sleeping()
+        if not actions:
+            return
+        for action in actions:
+            self._log_sleep_action(action)
+        self.refresh_activity()
+
     def _poll_sleep_manager(self) -> None:
         enabled = self.config.sleep_enabled and not self.config.observation_only_mode
         actions = self.sleep_manager.poll(
@@ -2440,7 +2523,7 @@ class PCOptimizerQtWindow(QMainWindow):
                 entry.name,
                 _format_time(entry.slept_at),
                 entry.reason,
-                "suspended" if entry.suspended else "idle priority",
+                _sleep_strategy_label(entry.strategy, entry.suspended),
             )
             for column, value in enumerate(values):
                 self.sleep_table.setItem(row, column, QTableWidgetItem(value))
@@ -2510,7 +2593,55 @@ class PCOptimizerQtWindow(QMainWindow):
         self.refresh_whitelist_lists()
         self.refresh_activity()
 
-    def save_settings(self) -> None:
+    def export_settings_to_file(self) -> None:
+        if not self.save_settings(show_message=False):
+            return
+        selected_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Экспорт настроек",
+            str(Path.home() / "pc-optimizer-lite-settings.json"),
+            "JSON settings (*.json);;All files (*.*)",
+        )
+        if not selected_path:
+            return
+        target = Path(selected_path)
+        if not target.suffix:
+            target = target.with_suffix(".json")
+        try:
+            export_config(self.config, target)
+        except OSError as exc:
+            QMessageBox.critical(self, "Экспорт настроек", f"Не удалось сохранить файл:\n{exc}")
+            return
+        self.history.add_event("settings", "Settings exported", f"Exported to {target}", "success")
+        QMessageBox.information(self, "Экспорт настроек", f"Настройки сохранены в файл:\n{target}")
+
+    def import_settings_from_file(self) -> None:
+        selected_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Импорт настроек",
+            str(Path.home()),
+            "JSON settings (*.json);;All files (*.*)",
+        )
+        if not selected_path:
+            return
+        source = Path(selected_path)
+        try:
+            imported = import_config(source)
+        except ValueError as exc:
+            QMessageBox.critical(self, "Импорт настроек", str(exc))
+            return
+
+        self._copy_config_values(imported)
+        save_config(self.config)
+        self._sync_controls_from_config()
+        self._apply_config_runtime()
+        self.apply_theme()
+        self.refresh_whitelist_lists()
+        self.history.add_event("settings", "Settings imported", f"Imported from {source}", "success")
+        QMessageBox.information(self, "Импорт настроек", "Настройки импортированы, проверены и применены.")
+        self.refresh_activity()
+
+    def save_settings(self, checked: bool = False, *, show_message: bool = True) -> bool:
         try:
             self.config.theme = self.theme_combo.currentData()
             self.config.automation_mode = self.automation_mode_combo.currentData()
@@ -2518,7 +2649,7 @@ class PCOptimizerQtWindow(QMainWindow):
                 self.automation_mode_combo.setCurrentIndex(0)
                 self.config.automation_mode = "observation"
                 self._preview_automation_mode()
-                return
+                return False
             self.config.observation_only_mode = self.observation_only_check.isChecked()
             self.config.lite_mode_enabled = self.lite_mode_check.isChecked()
             self.config.monitor_interval_seconds = float(self.interval_edit.text())
@@ -2571,7 +2702,7 @@ class PCOptimizerQtWindow(QMainWindow):
             self.config.auto_install_updates = self.update_auto_install_check.isChecked()
         except ValueError:
             QMessageBox.critical(self, "Настройки", "Проверьте числовые значения.")
-            return
+            return False
         apply_automation_mode(self.config)
         self._sync_controls_from_config()
         try:
@@ -2587,18 +2718,13 @@ class PCOptimizerQtWindow(QMainWindow):
             autostart_detail = f"Autostart unchanged: {exc}"
         save_config(self.config)
         self._sync_controls_from_config()
-        self.notifier.cooldown_seconds = self.config.notification_cooldown_seconds
-        self.monitor.interval_seconds = self.config.monitor_interval_seconds
-        self.monitor.process_refresh_seconds = self.config.process_refresh_seconds
-        self._foreground_monitor_interval = self.config.monitor_interval_seconds
-        self._foreground_process_interval = self.config.process_refresh_seconds
-        self._apply_runtime_performance_mode()
-        if not self.isVisible() or self.isMinimized():
-            self._enter_background_mode()
+        self._apply_config_runtime()
         self.apply_theme()
         self.history.add_event("settings", "Settings saved", f"Configuration persisted. {autostart_detail}", "success")
-        QMessageBox.information(self, "Настройки", "Настройки сохранены.")
+        if show_message:
+            QMessageBox.information(self, "Настройки", "Настройки сохранены.")
         self.refresh_activity()
+        return True
 
     def check_updates_now(self) -> None:
         if self._pending_update and self._pending_update.update_available:
@@ -3148,6 +3274,10 @@ def _qss(palette: dict[str, str]) -> str:
         font-family: "Segoe UI", Arial, sans-serif;
         font-size: 13px;
     }}
+    QLabel {{
+        background: transparent;
+        border: none;
+    }}
     QTabWidget::pane {{
         border: 1px solid {palette["border"]};
         border-radius: 12px;
@@ -3448,6 +3578,14 @@ def _format_time(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
 
 
+def _sleep_strategy_label(strategy: str, suspended: bool) -> str:
+    if strategy == "suspend" and suspended:
+        return "deep sleep"
+    if strategy == "suspend":
+        return "priority fallback"
+    return "priority sleep"
+
+
 def _format_categories(plan: CleanupPlan) -> str:
     if not plan.categories:
         return "Категории: нет данных"
@@ -3562,6 +3700,16 @@ def _feather_icon(name: str, color: str) -> QIcon:
         painter.drawLine(16, 7, 16, 23)
         painter.drawLine(9, 17, 16, 24)
         painter.drawLine(23, 17, 16, 24)
+    elif name == "download":
+        painter.drawLine(16, 6, 16, 19)
+        painter.drawLine(10, 14, 16, 20)
+        painter.drawLine(22, 14, 16, 20)
+        painter.drawLine(8, 25, 24, 25)
+    elif name == "upload":
+        painter.drawLine(16, 20, 16, 7)
+        painter.drawLine(10, 13, 16, 7)
+        painter.drawLine(22, 13, 16, 7)
+        painter.drawLine(8, 25, 24, 25)
     elif name in {"play", "rotate"}:
         painter.drawPolygon([QPointF(12, 8), QPointF(24, 16), QPointF(12, 24)])
     elif name == "clock":
