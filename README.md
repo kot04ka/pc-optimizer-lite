@@ -56,7 +56,7 @@ python main.py
 
 - генерирует иконку `assets\pc_optimizer_lite.ico`;
 - собирает onedir-папку PyInstaller, чтобы приложение не распаковывалось в `%TEMP%\_MEI` при запуске;
-- собирает `PC-Optimizer-Lite-windows-x64.zip` с onedir-папкой для автообновлений;
+- собирает `PC-Optimizer-Lite-windows-x64.zip` как portable/diagnostic onedir-архив;
 - включает hidden imports для PySide GUI, уведомлений, pywin32/WMI и внутренних модулей `autostart`, `optimize_action`, `ram_cleaner`, `cpu_optimizer`, `cpu_throttler`, `sleep_manager`, `safety.activity_detector`, `history_manager`;
 - собирает установщик через Inno Setup (`installer\PC Optimizer Lite.iss`), который ставит всю onedir-папку в `%LOCALAPPDATA%\Programs\PC Optimizer Lite`.
 
@@ -68,19 +68,19 @@ python main.py
 Для публикации новой версии:
 
 - соберите onedir ZIP и установщик через `.\build.bat`;
-- создайте GitHub Release с tag вида `v1.3.8` или выше текущей версии;
+- создайте GitHub Release с tag вида `v1.3.9` или выше текущей версии;
 - прикрепите assets `PC-Optimizer-Lite-windows-x64.zip` и `PC-Optimizer-Lite-Setup.exe`;
 - добавьте в описание релиза строки `PC-Optimizer-Lite-windows-x64.zip sha256: <хэш>` и `PC-Optimizer-Lite-Setup.exe sha256: <хэш>`.
 
 Репозиторий публичный, поэтому токен не нужен: приложение читает GitHub Releases API без авторизации. В пользовательских настройках нет полей owner/repo/token; для пользователя остаётся одна кнопка "Проверить обновления", которая меняется на "Обновить до X.X", когда найден новый релиз.
 
-Автообновление скачивает onedir ZIP, проверяет размер и sha256 до применения, ждёт завершения текущего процесса по PID, распаковывает новую версию рядом с установленной папкой и заменяет папку целиком. Старые файлы предыдущей версии не копируются поверх новой сборки.
+Автообновление скачивает `PC-Optimizer-Lite-Setup.exe`, проверяет размер и sha256 до запуска, стартует установщик из `%TEMP%` в тихом режиме `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` и сразу закрывает приложение. Замену файлов выполняет Inno Setup с `CloseApplications=yes` и `RestartApplications=yes`; самописная замена/переименование папки приложения не используется.
 
-Если установленная версия уже не запускается с ошибкой `_PYI_APPLICATION_HOME_DIR environment variable is not defined!` или `Failed to load Python DLL ... _MEI...\python311.dll/python312.dll`, автообновление из приложения невозможно. Нужно вручную скачать `PC-Optimizer-Lite-Setup.exe` из GitHub Releases и установить поверх старой версии. Если ошибка осталась, удалите папки `_MEI*` из `%TEMP%` вручную и переустановите.
+Если установленная версия уже не запускается с ошибкой `_PYI_APPLICATION_HOME_DIR environment variable is not defined!` / `Failed to load Python DLL ... _MEI...\python311.dll/python312.dll` или зацикленно предлагает `1.3.8`, автообновление из этой версии невозможно. Нужно один раз вручную скачать `PC-Optimizer-Lite-Setup.exe` из GitHub Releases и установить поверх старой версии. После этого следующие автообновления будут идти через исправленный установщик. Если PyInstaller-ошибка осталась, удалите папки `_MEI*` из `%TEMP%` вручную и переустановите.
 
 ## Готовая сборка
 
-Версия: `1.3.8`
+Версия: `1.3.9`
 
 Дата сборки: `2026-06-26`
 
@@ -93,7 +93,7 @@ C:\Users\1\Documents\CleenChile\installer_output\PC-Optimizer-Lite-windows-x64.z
 SHA256:
 
 ```text
-5C6F9F37E7101FCCFA9EB53C0072E33E7D9A498C747EE2A05AC7A1B552BEA5A0
+92547F9C447EE5706E75B5FB0D615B7120B8549D5F7592F7035989AFAA01F22E
 ```
 
 Установщик:
@@ -105,7 +105,7 @@ C:\Users\1\Documents\CleenChile\installer_output\PC-Optimizer-Lite-Setup.exe
 SHA256:
 
 ```text
-1CEEBCD1CFDFC7DA2BC6917E44EBBDF8C4C1F2BA191944FC0F0FCC4F9A8EDF47
+48A25482FB61E6A03915E93893D4C8FCE738D7BE1CEB17C81BF3B477632F0914
 ```
 
 Команда пересборки с нуля из корня проекта:
@@ -135,6 +135,15 @@ CPU считался по дельте `Get-Process.CPU` за 30 секунд и
 - Главные устранённые причины прежних ~15% CPU: постоянный обход процессов, дублирующий process refresh, отдельный repaint-таймер графика, температурные WMI/sensor-probes на системе без датчиков и отсутствие фонового low-power режима при `--tray`.
 
 ## Changelog
+
+### 1.3.9
+
+- Hot-fix: исправлено зацикленное обновление после `1.3.8`.
+- Автообновление теперь скачивает и проверяет `PC-Optimizer-Lite-Setup.exe`, запускает Inno Setup из `%TEMP%` в тихом режиме и сразу закрывает приложение.
+- Убраны самописный `apply_pc_optimizer_lite_update.ps1`, переименование/перемещение занятой папки приложения из updater'а и блокирующий `QMessageBox` перед выходом.
+- Inno Setup настроен на `CloseApplications=yes` и `RestartApplications=yes`; silent install запускает обновлённое приложение.
+- Пользователям, застрявшим на `1.3.8`, нужно один раз обновиться вручную установщиком; дальше автообновление будет работать по новому flow.
+- Windows Defender, антивирусы и системные настройки защиты не отключаются и не изменяются.
 
 ### 1.3.8
 

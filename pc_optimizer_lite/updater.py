@@ -104,7 +104,7 @@ def check_for_updates(
     if latest_version == _normalize_version(skipped_version):
         return UpdateCheckResult(configured=True, latest_version=latest_version, skipped=True)
     body = str(payload.get("body") or "")
-    asset = _select_windows_onedir_asset(payload.get("assets", []), body)
+    asset = _select_windows_installer_asset(payload.get("assets", []), body)
     if not is_newer_version(latest_version, current_version):
         result = UpdateCheckResult(
             configured=True,
@@ -124,7 +124,7 @@ def check_for_updates(
         release_url=str(payload.get("html_url") or ""),
         body=body,
         asset=asset,
-        message="Update available." if asset else "Release has no onedir ZIP asset.",
+        message="Update available." if asset else "Release has no Windows installer asset.",
     )
     _save_cached_update_check(owner, repo, result)
     return result
@@ -164,7 +164,7 @@ def download_update_asset(
 
     destination = destination_dir or Path(tempfile.gettempdir()) / "pc_optimizer_lite_update"
     destination.mkdir(parents=True, exist_ok=True)
-    safe_name = re.sub(r"[^A-Za-z0-9._ -]+", "_", asset.name).strip() or "pc_optimizer_lite_update.zip"
+    safe_name = re.sub(r"[^A-Za-z0-9._ -]+", "_", asset.name).strip() or "pc_optimizer_lite_update.exe"
     target = destination / safe_name
     request = urllib.request.Request(
         asset.url,
@@ -180,7 +180,10 @@ def download_update_asset(
                 handle.write(chunk)
                 downloaded += len(chunk)
                 if progress_callback and asset.size:
-                    progress_callback(min(99, round(downloaded * 100 / asset.size)), f"Скачано {downloaded}/{asset.size} байт")
+                    progress_callback(
+                        min(99, round(downloaded * 100 / asset.size)),
+                        f"Downloaded {downloaded}/{asset.size} bytes",
+                    )
 
     actual_size = target.stat().st_size
     if asset.size and actual_size != asset.size:
@@ -192,52 +195,52 @@ def download_update_asset(
             target.unlink(missing_ok=True)
             raise UpdateError("Downloaded SHA256 does not match release notes.")
     if progress_callback:
-        progress_callback(100, "Файл скачан")
+        progress_callback(100, "File downloaded")
     return target
 
 
-def install_downloaded_update(downloaded_archive: Path, *, current_exe: Path | None = None) -> Path:
-    """Launch a helper script that swaps the installed onedir application."""
+def install_downloaded_update(downloaded_installer: Path, *, current_exe: Path | None = None) -> Path:
+    """Launch the downloaded Inno Setup installer in silent update mode."""
 
     current = current_exe or Path(sys.executable)
     if current.suffix.lower() != ".exe" or current.name.lower() in {"python.exe", "pythonw.exe"}:
-        raise UpdateError("Automatic replacement is available only in the packaged .exe build.")
-    if not downloaded_archive.exists():
-        raise UpdateError(f"Downloaded update not found: {downloaded_archive}")
-    if downloaded_archive.suffix.lower() != ".zip":
-        raise UpdateError("Automatic replacement requires an onedir ZIP release asset.")
+        raise UpdateError("Automatic installer update is available only in the packaged .exe build.")
+    if not downloaded_installer.exists():
+        raise UpdateError(f"Downloaded update installer not found: {downloaded_installer}")
+    if downloaded_installer.suffix.lower() != ".exe":
+        raise UpdateError("Automatic update requires the Windows setup executable release asset.")
 
-    script = current.with_name("apply_pc_optimizer_lite_update.ps1")
-    script.write_text(_replacement_script(current_exe=current, archive=downloaded_archive, pid=os.getpid()), encoding="utf-8")
+    temp_dir = Path(tempfile.gettempdir())
     creation_flags = 0
     if os.name == "nt":
-        creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
+            subprocess,
+            "DETACHED_PROCESS",
+            0,
+        )
+    os.chdir(temp_dir)
     subprocess.Popen(
         [
-            "powershell.exe",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-File",
-            str(script),
+            str(downloaded_installer),
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
         ],
-        cwd=str(current.parent),
+        cwd=str(temp_dir),
         creationflags=creation_flags,
         close_fds=True,
     )
-    return script
+    return downloaded_installer
 
 
 def download_and_install_update(asset: ReleaseAsset, progress_callback: Callable[[int, str], None] | None = None) -> Path:
-    """Download an onedir ZIP asset and stage replacement for the app folder."""
+    """Download the setup asset and launch it for a silent in-place update."""
 
     downloaded = download_update_asset(asset, progress_callback=progress_callback)
     return install_downloaded_update(downloaded)
 
 
-def _select_windows_onedir_asset(raw_assets: Any, release_body: str) -> ReleaseAsset | None:
+def _select_windows_installer_asset(raw_assets: Any, release_body: str) -> ReleaseAsset | None:
     if not isinstance(raw_assets, list):
         return None
     hashes = _sha256_hashes_from_text(release_body)
@@ -248,9 +251,9 @@ def _select_windows_onedir_asset(raw_assets: Any, release_body: str) -> ReleaseA
         name = str(item.get("name") or "")
         url = str(item.get("browser_download_url") or "")
         lowered = name.lower()
-        if not lowered.endswith(".zip") or not url:
+        if not lowered.endswith(".exe") or not url:
             continue
-        if "setup" in lowered or "installer" in lowered:
+        if "setup" not in lowered and "installer" not in lowered:
             continue
         candidates.append(
             ReleaseAsset(
@@ -262,14 +265,15 @@ def _select_windows_onedir_asset(raw_assets: Any, release_body: str) -> ReleaseA
         )
     if not candidates:
         return None
-    candidates.sort(key=lambda asset: _onedir_asset_score(asset.name))
+    candidates.sort(key=lambda asset: _installer_asset_score(asset.name))
     return candidates[0]
 
 
-def _onedir_asset_score(name: str) -> tuple[int, int, str]:
+def _installer_asset_score(name: str) -> tuple[int, int, int, str]:
     lowered = name.lower()
     return (
         0 if "pc-optimizer-lite" in lowered or "pc optimizer lite" in lowered else 1,
+        0 if "setup" in lowered else 1,
         0 if "windows" in lowered or "win" in lowered or "x64" in lowered else 1,
         lowered,
     )
@@ -334,8 +338,8 @@ def _result_from_cache(
         if asset_payload
         else None
     )
-    asset_is_zip = asset is not None and asset.name.lower().endswith(".zip")
-    update_available = bool(cache.get("update_available")) and asset_is_zip and is_newer_version(
+    asset_is_installer = asset is not None and asset.name.lower().endswith(".exe")
+    update_available = bool(cache.get("update_available")) and asset_is_installer and is_newer_version(
         latest_version,
         current_version,
     )
@@ -373,170 +377,6 @@ def _sha256_hashes_from_text(text: str) -> dict[str, str]:
         if match:
             hashes[match.group(1).strip().lower()] = match.group(2)
     return hashes
-
-
-def _replacement_script(*, current_exe: Path, archive: Path, pid: int) -> str:
-    current = _ps_quote(str(current_exe))
-    archive_path = _ps_quote(str(archive))
-    app_dir = _ps_quote(str(current_exe.parent))
-    parent_dir = _ps_quote(str(current_exe.parent.parent))
-    app_leaf = _ps_quote(current_exe.parent.name)
-    log_path = _ps_quote(str(current_exe.parent.parent / f"pc_optimizer_lite_update_{pid}.log"))
-    return (
-        "$ErrorActionPreference = 'Stop'\n"
-        f"$currentExe = {current}\n"
-        f"$archive = {archive_path}\n"
-        f"$pidToWait = {pid}\n"
-        f"$appDir = {app_dir}\n"
-        f"$parentDir = {parent_dir}\n"
-        f"$appLeaf = {app_leaf}\n"
-        "$newRoot = Join-Path $parentDir \"$appLeaf.update.$pidToWait\"\n"
-        "$oldDir = Join-Path $parentDir \"$appLeaf.old.$pidToWait\"\n"
-        "$oldExe = Join-Path $oldDir 'PC Optimizer Lite.exe'\n"
-        f"$logPath = {log_path}\n"
-        "function Write-UpdateLog([string]$message) {\n"
-        "    try { Add-Content -LiteralPath $logPath -Encoding UTF8 -Value \"$(Get-Date -Format o) $message\" } catch { }\n"
-        "}\n"
-        "function Get-ProcessesByExecutablePath([string]$path) {\n"
-        "    @(Get-Process -ErrorAction SilentlyContinue | Where-Object {\n"
-        "        try { $_.Path -and ([string]::Equals($_.Path, $path, [StringComparison]::OrdinalIgnoreCase)) } catch { $false }\n"
-        "    })\n"
-        "}\n"
-        "function Stop-ProcessesByExecutablePath([string]$path) {\n"
-        "    foreach ($proc in (Get-ProcessesByExecutablePath $path)) {\n"
-        "        try {\n"
-        "            Stop-Process -Id $proc.Id -Force -ErrorAction Stop\n"
-        "            Write-UpdateLog \"Stopped stale process $($proc.Id) using $path.\"\n"
-        "        } catch { }\n"
-        "    }\n"
-        "}\n"
-        "function Remove-DirectoryWithRetry([string]$path, [int]$attempts) {\n"
-        "    for ($attempt = 1; $attempt -le $attempts; $attempt++) {\n"
-        "        Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue\n"
-        "        if (-not (Test-Path -LiteralPath $path)) { return $true }\n"
-        "        Start-Sleep -Milliseconds ([Math]::Min(1500, 200 * $attempt))\n"
-        "    }\n"
-        "    return $false\n"
-        "}\n"
-        "function Resolve-NewAppDir([string]$root) {\n"
-        "    $directExe = Join-Path $root 'PC Optimizer Lite.exe'\n"
-        "    if ((Test-Path -LiteralPath $directExe) -and (Test-Path -LiteralPath (Join-Path $root '_internal'))) {\n"
-        "        return $root\n"
-        "    }\n"
-        "    $matches = @(Get-ChildItem -LiteralPath $root -Recurse -Filter 'PC Optimizer Lite.exe' -File -ErrorAction Stop | Where-Object {\n"
-        "        Test-Path -LiteralPath (Join-Path $_.DirectoryName '_internal')\n"
-        "    })\n"
-        "    if ($matches.Count -ne 1) {\n"
-        "        throw \"Expected exactly one onedir app in archive, found $($matches.Count).\"\n"
-        "    }\n"
-        "    return $matches[0].DirectoryName\n"
-        "}\n"
-        "try {\n"
-        "    Write-UpdateLog 'Updater started.'\n"
-        "    $deadline = (Get-Date).AddSeconds(60)\n"
-        "    while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {\n"
-        "        if ((Get-Date) -gt $deadline) {\n"
-        f"            throw \"Timed out waiting for process {pid} to exit.\"\n"
-        "        }\n"
-        "        Start-Sleep -Milliseconds 300\n"
-        "    }\n"
-        "    Start-Sleep -Milliseconds 700\n"
-        "    $pathReleaseDeadline = (Get-Date).AddSeconds(10)\n"
-        "    while (Get-ProcessesByExecutablePath $currentExe) {\n"
-        "        if ((Get-Date) -gt $pathReleaseDeadline) {\n"
-        "            Stop-ProcessesByExecutablePath $currentExe\n"
-        "            break\n"
-        "        }\n"
-        "        Start-Sleep -Milliseconds 300\n"
-        "    }\n"
-        "    if (-not (Test-Path -LiteralPath $archive)) {\n"
-        "        throw \"Downloaded update archive is missing: $archive\"\n"
-        "    }\n"
-        "    Remove-DirectoryWithRetry $newRoot 5 | Out-Null\n"
-        "    New-Item -ItemType Directory -Force -Path $newRoot | Out-Null\n"
-        "    Expand-Archive -LiteralPath $archive -DestinationPath $newRoot -Force\n"
-        "    $newAppDir = Resolve-NewAppDir $newRoot\n"
-        "    if (-not (Test-Path -LiteralPath (Join-Path $newAppDir 'PC Optimizer Lite.exe'))) {\n"
-        "        throw \"Updated executable is missing in archive.\"\n"
-        "    }\n"
-        "    $replaced = $false\n"
-        "    $lastError = ''\n"
-        "    for ($attempt = 1; $attempt -le 20; $attempt++) {\n"
-        "        try {\n"
-        "            Remove-DirectoryWithRetry $oldDir 3 | Out-Null\n"
-        "            $renamedOld = $false\n"
-        "            if (Test-Path -LiteralPath $appDir) {\n"
-        "                Rename-Item -LiteralPath $appDir -NewName (Split-Path -Leaf $oldDir) -ErrorAction Stop\n"
-        "                $renamedOld = $true\n"
-        "            }\n"
-        "            try {\n"
-        "                Move-Item -LiteralPath $newAppDir -Destination $appDir -ErrorAction Stop\n"
-        "            } catch {\n"
-        "                $moveError = $_.Exception.Message\n"
-        "                if ($renamedOld -and (Test-Path -LiteralPath $oldDir) -and -not (Test-Path -LiteralPath $appDir)) {\n"
-        "                    Rename-Item -LiteralPath $oldDir -NewName $appLeaf -ErrorAction SilentlyContinue\n"
-        "                }\n"
-        "                throw $moveError\n"
-        "            }\n"
-        "            $replaced = $true\n"
-        "            Write-UpdateLog \"Replacement succeeded on attempt $attempt.\"\n"
-        "            break\n"
-        "        } catch {\n"
-        "            $lastError = $_.Exception.Message\n"
-        "            Write-UpdateLog \"Replacement attempt $attempt failed: $lastError\"\n"
-        "            Start-Sleep -Milliseconds ([Math]::Min(1500, 200 * $attempt))\n"
-        "        }\n"
-        "    }\n"
-        "    if (-not $replaced) {\n"
-        "        throw \"Update directory replacement failed: $lastError\"\n"
-        "    }\n"
-        "    $updatedExe = Join-Path $appDir 'PC Optimizer Lite.exe'\n"
-        "    if (-not (Test-Path -LiteralPath $updatedExe)) {\n"
-        "        throw \"Updated executable is missing after replacement: $updatedExe\"\n"
-        "    }\n"
-        "    Remove-DirectoryWithRetry $newRoot 3 | Out-Null\n"
-        "    Start-Sleep -Milliseconds 500\n"
-        "    Start-Process -FilePath $updatedExe -WorkingDirectory $appDir\n"
-        "    $cleanupScript = Join-Path $env:TEMP \"pc_optimizer_lite_update_cleanup_$pidToWait.ps1\"\n"
-        "    $cleanupLines = @(\n"
-        "        '$ErrorActionPreference = ''SilentlyContinue''',\n"
-        "        \"`$oldDir = '$($oldDir.Replace(\"'\", \"''\"))'\",\n"
-        "        \"`$oldExe = '$($oldExe.Replace(\"'\", \"''\"))'\",\n"
-        "        \"`$newRoot = '$($newRoot.Replace(\"'\", \"''\"))'\",\n"
-        "        \"`$archive = '$($archive.Replace(\"'\", \"''\"))'\",\n"
-        "        \"`$logPath = '$($logPath.Replace(\"'\", \"''\"))'\",\n"
-        "        '$removed = $false',\n"
-        "        'for ($attempt = 1; $attempt -le 120; $attempt++) {',\n"
-        "        '    foreach ($proc in @(Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -and ([string]::Equals($_.Path, $oldExe, [StringComparison]::OrdinalIgnoreCase)) } catch { $false } })) {',\n"
-        "        '        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue',\n"
-        "        '    }',\n"
-        "        '    Remove-Item -LiteralPath $oldDir -Recurse -Force -ErrorAction SilentlyContinue',\n"
-        "        '    if (-not (Test-Path -LiteralPath $oldDir)) { $removed = $true; break }',\n"
-        "        '    Start-Sleep -Milliseconds 1000',\n"
-        "        '}',\n"
-        "        'Remove-Item -LiteralPath $newRoot -Recurse -Force -ErrorAction SilentlyContinue',\n"
-        "        'Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue',\n"
-        "        'if ($removed) {',\n"
-        "        '    try { Add-Content -LiteralPath $logPath -Encoding UTF8 -Value \"$(Get-Date -Format o) Old directory cleanup finished.\" } catch { }',\n"
-        "        '} else {',\n"
-        "        '    try { Add-Content -LiteralPath $logPath -Encoding UTF8 -Value \"$(Get-Date -Format o) Old directory cleanup deferred; files are still locked.\" } catch { }',\n"
-        "        '}',\n"
-        "        'Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue'\n"
-        "    )\n"
-        "    Set-Content -LiteralPath $cleanupScript -Encoding UTF8 -Value $cleanupLines\n"
-        "    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList \"-NoProfile -ExecutionPolicy Bypass -File `\"$cleanupScript`\"\"\n"
-        "    Write-UpdateLog 'Updated executable started.'\n"
-        "} catch {\n"
-        "    Write-UpdateLog $_.Exception.Message\n"
-        "    throw\n"
-        "} finally {\n"
-        "    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
-        "}\n"
-    )
-
-
-def _ps_quote(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
 
 
 def _sha256_file(path: Path) -> str:

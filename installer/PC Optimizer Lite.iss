@@ -21,7 +21,7 @@ SetupIconFile=..\assets\pc_optimizer_lite.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 WizardStyle=modern
 CloseApplications=yes
-RestartApplications=no
+RestartApplications=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -104,4 +104,5 @@ end;
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch PC Optimizer Lite"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent
 

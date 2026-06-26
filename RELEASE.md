@@ -11,7 +11,7 @@ pc_optimizer_lite/version.py
 Set:
 
 ```python
-APP_VERSION = "1.3.8"
+APP_VERSION = "1.3.9"
 ```
 
 Keep `pyproject.toml` in sync for package metadata.
@@ -34,15 +34,15 @@ installer_output\PC-Optimizer-Lite-windows-x64.zip
 installer_output\PC-Optimizer-Lite-Setup.exe
 ```
 
-The app is built as PyInstaller onedir only. The update ZIP contains the whole onedir folder; the installer places that folder under `%LOCALAPPDATA%\Programs\PC Optimizer Lite`.
+The app is built as PyInstaller onedir only. The installer places that folder under `%LOCALAPPDATA%\Programs\PC Optimizer Lite`; auto-update downloads and runs the installer, not the ZIP.
 
 ## 3. Create GitHub Release
 
 Create a tag matching the version:
 
 ```powershell
-git tag v1.3.8
-git push origin v1.3.8
+git tag v1.3.9
+git push origin v1.3.9
 ```
 
 Then create a GitHub Release for that tag and attach these assets:
@@ -55,27 +55,25 @@ installer_output\PC-Optimizer-Lite-Setup.exe
 Recommended release notes:
 
 ```text
-Hot-fix: stabilized settings persistence, auto-optimization triggers, and sleep-mode wake behavior.
+Hot-fix: fixed the auto-update loop by switching updates to the Inno Setup installer.
 
 Changes:
 - Main distribution is now an onedir folder installed by Inno Setup.
-- Auto-update downloads the onedir ZIP, verifies size and SHA256 before applying it, and replaces the whole app directory after the old process exits.
-- Old files from previous versions are removed instead of being copied over.
-- Settings are saved with a schema version, support export/import/reset, and corrupt configs fall back to the optimal preset.
-- RAM, CPU ProBalance, periodic optimization, and quiet/autopilot notifications are covered by regression tests.
-- Sleep mode now uses priority sleep for visible/data-risk apps, keeps deep suspend for headless-safe candidates, and wakes via foreground/cursor polling.
-- Label backgrounds were made transparent and settings wording/tooltips were clarified.
+- Auto-update downloads `PC-Optimizer-Lite-Setup.exe`, verifies size and SHA256, launches it from `%TEMP%` with `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`, and exits immediately.
+- The old self-replacement PowerShell script and folder rename/move logic were removed from the updater.
+- Inno Setup now has `CloseApplications=yes` and `RestartApplications=yes`; silent installs also launch the updated app.
+- Users stuck on 1.3.8 must install this release manually once with `PC-Optimizer-Lite-Setup.exe`; later auto-updates use the fixed installer flow.
 - Windows Defender and other system protection settings are not changed.
 
 PC-Optimizer-Lite-windows-x64.zip sha256: <SHA256 of installer_output\PC-Optimizer-Lite-windows-x64.zip>
 PC-Optimizer-Lite-Setup.exe sha256: <SHA256 of installer_output\PC-Optimizer-Lite-Setup.exe>
 ```
 
-The updater selects the onedir ZIP asset and uses the release tag for semver comparison. Always bump the tag for a new public update.
+The updater selects the `PC-Optimizer-Lite-Setup.exe` asset and uses the release tag for semver comparison. Always bump the tag for a new public update.
 
 ## 4. Automatic Build From Tags
 
-The workflow in `.github/workflows/build.yml` builds and uploads release assets automatically when a tag like `v1.3.8` is pushed.
+The workflow in `.github/workflows/build.yml` builds and uploads release assets automatically when a tag like `v1.3.9` is pushed.
 
 The app checks:
 

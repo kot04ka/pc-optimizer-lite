@@ -37,13 +37,14 @@ jobs:
           $onedirHash = (Get-FileHash -LiteralPath $onedirZip -Algorithm SHA256).Hash.ToLowerInvariant()
           $setupHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
           $notes = @(
-            "Hot-fix: switched PC Optimizer Lite to onedir packaging and made sleep mode safe for windowed apps.",
+            "Hot-fix: fixed the PC Optimizer Lite auto-update loop by switching updates to the Inno Setup installer.",
             "",
             "Changes:",
             "- Main distribution is now an onedir folder installed by Inno Setup.",
-            "- Auto-update downloads the onedir ZIP, verifies size and SHA256 before applying it, and replaces the whole app directory after the old process exits.",
-            "- Old files from previous versions are removed instead of being copied over.",
-            "- Sleep mode now uses priority sleep for visible/data-risk apps, keeps deep suspend for headless-safe candidates, and wakes via foreground/cursor polling.",
+            "- Auto-update downloads PC-Optimizer-Lite-Setup.exe, verifies size and SHA256, launches it from TEMP with /VERYSILENT /SUPPRESSMSGBOXES /NORESTART, and exits immediately.",
+            "- Removed the self-replacement PowerShell script and in-app folder rename/move updater.",
+            "- Inno Setup closes/restarts the app with CloseApplications=yes and RestartApplications=yes.",
+            "- Users stuck on 1.3.8 must install this release manually once with PC-Optimizer-Lite-Setup.exe; later auto-updates use the fixed installer flow.",
             "- Windows Defender and other system protection settings are not changed.",
             "",
             "PC-Optimizer-Lite-windows-x64.zip sha256: $onedirHash",

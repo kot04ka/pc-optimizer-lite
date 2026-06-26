@@ -295,7 +295,7 @@ class UpdateCheckWorker(QObject):
 
 
 class UpdateInstallWorker(QObject):
-    """Downloads and stages an update in the background."""
+    """Downloads and launches the update installer in the background."""
 
     progress_received = Signal(int, str)
     result_received = Signal(object)
@@ -2905,24 +2905,19 @@ class PCOptimizerQtWindow(QMainWindow):
         if hasattr(self, "check_updates_button"):
             self.check_updates_button.setText(progress_text)
 
-    def _on_update_install_result(self, script_path: Path) -> None:
+    def _on_update_install_result(self, installer_path: Path) -> None:
         self.history.add_event(
             "updates",
-            "Update staged",
-            f"Replacement script started: {script_path}",
+            "Update installer launched",
+            f"Silent installer started: {installer_path}",
             "success",
-        )
-        QMessageBox.information(
-            self,
-            "Обновление",
-            "Установка, приложение перезапустится.",
         )
         self.update_banner_label.setText("Установка, приложение перезапустится")
         self.update_banner_button.setText("Установка...")
         if hasattr(self, "check_updates_button"):
             self.check_updates_button.setText("Установка...")
         self._allow_close = True
-        QApplication.instance().quit()
+        QTimer.singleShot(0, self.exit_app)
 
     def _on_update_install_error(self, message: str) -> None:
         self.history.add_event("updates", "Update failed", message, "error")

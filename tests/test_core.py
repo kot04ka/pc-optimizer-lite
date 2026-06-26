@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from pc_optimizer_lite import updater as updater_module
 from pc_optimizer_lite.autostart import get_launch_command
 from pc_optimizer_lite.config import (
     AppConfig,
@@ -36,8 +37,8 @@ from pc_optimizer_lite.ram_cleaner import RamCleanMode, RamCleanResult
 from pc_optimizer_lite.sleep_manager import SKIP_SLEEP_NAMES, SleepManager
 from pc_optimizer_lite.smart_process_manager import SmartProcessManager
 from pc_optimizer_lite.updater import (
-    _replacement_script,
-    _select_windows_onedir_asset,
+    _select_windows_installer_asset,
+    install_downloaded_update,
     is_newer_version,
     is_repository_configured,
 )
@@ -278,10 +279,10 @@ class CleanupTests(unittest.TestCase):
 
 
 class UpdaterSafetyTests(unittest.TestCase):
-    def test_selects_onedir_zip_asset_and_uses_release_hash(self) -> None:
+    def test_selects_setup_installer_asset_and_uses_release_hash(self) -> None:
         release_hash = "a" * 64
         setup_hash = "b" * 64
-        asset = _select_windows_onedir_asset(
+        asset = _select_windows_installer_asset(
             [
                 {
                     "name": "PC-Optimizer-Lite.exe",
@@ -306,38 +307,62 @@ class UpdaterSafetyTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(asset)
-        self.assertEqual(asset.name, "PC-Optimizer-Lite-windows-x64.zip")  # type: ignore[union-attr]
-        self.assertEqual(asset.url, "https://example.invalid/onedir.zip")  # type: ignore[union-attr]
-        self.assertEqual(asset.size, 30)  # type: ignore[union-attr]
-        self.assertEqual(asset.sha256, release_hash)  # type: ignore[union-attr]
+        self.assertEqual(asset.name, "PC-Optimizer-Lite-Setup.exe")  # type: ignore[union-attr]
+        self.assertEqual(asset.url, "https://example.invalid/setup.exe")  # type: ignore[union-attr]
+        self.assertEqual(asset.size, 20)  # type: ignore[union-attr]
+        self.assertEqual(asset.sha256, setup_hash)  # type: ignore[union-attr]
 
-    def test_replacement_script_waits_and_swaps_the_whole_app_directory(self) -> None:
-        script = _replacement_script(
-            current_exe=Path(r"C:\Apps\PC Optimizer Lite\PC Optimizer Lite.exe"),
-            archive=Path(r"C:\Temp\PC-Optimizer-Lite-windows-x64.zip"),
-            pid=4242,
-        )
+    def test_install_downloaded_update_launches_silent_setup_from_temp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            install_dir = root / "PC Optimizer Lite"
+            install_dir.mkdir()
+            current_exe = install_dir / "PC Optimizer Lite.exe"
+            current_exe.write_bytes(b"old")
+            setup = root / "PC-Optimizer-Lite-Setup.exe"
+            setup.write_bytes(b"new")
+            calls: dict[str, object] = {}
 
-        self.assertIn("$deadline", script)
-        self.assertIn("Timed out waiting for process 4242", script)
-        self.assertIn("$appDir", script)
-        self.assertIn("$oldDir", script)
-        self.assertIn("$newRoot", script)
-        self.assertIn("Expand-Archive", script)
-        self.assertIn("Resolve-NewAppDir", script)
-        self.assertIn("for ($attempt = 1", script)
-        self.assertIn("Rename-Item -LiteralPath $appDir", script)
-        self.assertIn("Move-Item -LiteralPath $newAppDir -Destination $appDir", script)
-        self.assertIn("Remove-Item -LiteralPath $oldDir -Recurse", script)
-        self.assertIn("Get-ProcessesByExecutablePath", script)
-        self.assertIn("pc_optimizer_lite_update_cleanup", script)
-        self.assertIn("$removed = $false", script)
-        self.assertIn("for ($attempt = 1; $attempt -le 120", script)
-        self.assertIn("Old directory cleanup deferred", script)
-        self.assertIn("-ErrorAction Stop", script)
-        self.assertIn("$replaced = $true", script)
-        self.assertIn("Update directory replacement failed", script)
-        self.assertLess(script.index("if (-not $replaced)"), script.index("Start-Process"))
+            original_popen = updater_module.subprocess.Popen
+            original_chdir = updater_module.os.chdir
+
+            def fake_popen(args: list[str], **kwargs: object) -> object:
+                calls["args"] = args
+                calls["kwargs"] = kwargs
+                return object()
+
+            def fake_chdir(path: str | os.PathLike[str]) -> None:
+                calls["chdir"] = Path(path)
+
+            try:
+                updater_module.subprocess.Popen = fake_popen  # type: ignore[assignment]
+                updater_module.os.chdir = fake_chdir  # type: ignore[assignment]
+                launched = install_downloaded_update(setup, current_exe=current_exe)
+            finally:
+                updater_module.subprocess.Popen = original_popen  # type: ignore[assignment]
+                updater_module.os.chdir = original_chdir  # type: ignore[assignment]
+
+            self.assertEqual(launched, setup)
+            self.assertFalse((install_dir / "apply_pc_optimizer_lite_update.ps1").exists())
+            self.assertEqual(calls["chdir"], Path(tempfile.gettempdir()))
+            args = calls["args"]
+            self.assertIsInstance(args, list)
+            self.assertEqual(args[0], str(setup))  # type: ignore[index]
+            self.assertIn("/VERYSILENT", args)  # type: ignore[arg-type]
+            self.assertIn("/SUPPRESSMSGBOXES", args)  # type: ignore[arg-type]
+            self.assertIn("/NORESTART", args)  # type: ignore[arg-type]
+            kwargs = calls["kwargs"]
+            self.assertIsInstance(kwargs, dict)
+            self.assertEqual(kwargs.get("cwd"), tempfile.gettempdir())  # type: ignore[union-attr]
+
+    def test_updater_does_not_generate_self_replacement_script(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        updater_source = (root / "pc_optimizer_lite" / "updater.py").read_text(encoding="utf-8")
+
+        self.assertNotIn("apply_pc_optimizer_lite_update.ps1", updater_source)
+        self.assertNotIn("Rename-Item -LiteralPath $appDir", updater_source)
+        self.assertNotIn("Move-Item -LiteralPath $newAppDir", updater_source)
+        self.assertNotIn("Update directory replacement failed", updater_source)
 
 
 class PackagingTests(unittest.TestCase):
@@ -357,6 +382,17 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("PC-Optimizer-Lite-windows-x64.zip", workflow)
         self.assertIn("PC-Optimizer-Lite-Setup.exe", workflow)
         self.assertNotIn("PC-Optimizer-Lite.exe", workflow)
+
+    def test_inno_installer_supports_silent_update_flow(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "installer" / "PC Optimizer Lite.iss").read_text(encoding="utf-8")
+
+        self.assertIn("AppId={{6E9D6384-2E39-420D-A63B-2C195A5C5A09}", script)
+        self.assertIn(r"DefaultDirName={localappdata}\Programs\{#MyAppName}", script)
+        self.assertIn("CloseApplications=yes", script)
+        self.assertIn("RestartApplications=yes", script)
+        self.assertIn('Filename: "{app}\\{#MyAppExeName}"; Flags: nowait skipifnotsilent', script)
+        self.assertNotIn("RestartApplications=no", script)
 
     def test_project_does_not_disable_windows_defender_or_antivirus(self) -> None:
         root = Path(__file__).resolve().parents[1]
