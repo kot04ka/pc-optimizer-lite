@@ -44,6 +44,9 @@ YIELD_SECONDS = 0.06
 PROGRESS_MIN_INTERVAL_SECONDS = 0.25
 MAX_PROCESS_SNAPSHOTS = 260
 MAX_RAM_CLEAN_PROCESSES = 60
+SLEEP_MIN_CPU_PERCENT = 1.0
+SLEEP_MIN_MEMORY_PERCENT = 1.0
+SLEEP_MIN_RSS_BYTES = 100 * 1024 * 1024
 
 MEDIA_OR_BACKGROUND_NAMES = {
     "audiodg.exe",
@@ -733,6 +736,7 @@ def _sleep_processes(
             exe=item.exe,
             previous_priority=item.priority,
             reason="Optimization inactive app sleep",
+            has_visible_window=item.has_window,
         )
         if action:
             result.slept_actions.append(action)
@@ -878,7 +882,12 @@ def _is_sleep_candidate(item: ProcessOptimizationSnapshot, idle_age_seconds: flo
         return False
     if item.last_focus_age_seconds is None:
         return False
-    return item.last_focus_age_seconds >= idle_age_seconds
+    resource_active = (
+        item.cpu_percent >= SLEEP_MIN_CPU_PERCENT
+        or item.memory_percent >= SLEEP_MIN_MEMORY_PERCENT
+        or item.rss >= SLEEP_MIN_RSS_BYTES
+    )
+    return item.last_focus_age_seconds >= idle_age_seconds and resource_active
 
 
 def _is_priority_candidate(item: ProcessOptimizationSnapshot, config: AppConfig) -> bool:

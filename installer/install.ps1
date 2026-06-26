@@ -4,10 +4,24 @@ Add-Type -AssemblyName System.Windows.Forms
 
 $AppName = 'PC Optimizer Lite'
 $AppVersion = '__APP_VERSION__'
-$SourceExe = Join-Path $PSScriptRoot 'PC Optimizer Lite.exe'
-if (-not (Test-Path -LiteralPath $SourceExe)) {
-    $SourceExe = Join-Path $PSScriptRoot 'PCOptimizerLite.exe'
+$PayloadDir = $PSScriptRoot
+$PayloadZip = Join-Path $PSScriptRoot 'PC-Optimizer-Lite-windows-x64.zip'
+if (Test-Path -LiteralPath $PayloadZip) {
+    $ExtractedPayload = Join-Path $PSScriptRoot 'payload'
+    Remove-Item -LiteralPath $ExtractedPayload -Recurse -Force -ErrorAction SilentlyContinue
+    Expand-Archive -LiteralPath $PayloadZip -DestinationPath $ExtractedPayload -Force
+    if (Test-Path -LiteralPath (Join-Path $ExtractedPayload 'PC Optimizer Lite\PC Optimizer Lite.exe')) {
+        $PayloadDir = Join-Path $ExtractedPayload 'PC Optimizer Lite'
+    } else {
+        $PayloadDir = $ExtractedPayload
+    }
 }
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'payload\PC Optimizer Lite.exe')) {
+    $PayloadDir = Join-Path $PSScriptRoot 'payload'
+} elseif (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'PC Optimizer Lite\PC Optimizer Lite.exe')) {
+    $PayloadDir = Join-Path $PSScriptRoot 'PC Optimizer Lite'
+}
+$SourceExe = Join-Path $PayloadDir 'PC Optimizer Lite.exe'
 $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\PC Optimizer Lite'
 $TargetExe = Join-Path $InstallDir 'PC Optimizer Lite.exe'
 $StartMenuDir = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs\PC Optimizer Lite'
@@ -107,6 +121,49 @@ function Stop-InstalledApp {
     }
 }
 
+function Clear-PyInstallerTemp {
+    Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter '_MEI*' -ErrorAction SilentlyContinue | ForEach-Object {
+        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-AvailableBackupPath([string]$basePath) {
+    if (-not (Test-Path -LiteralPath $basePath)) {
+        return $basePath
+    }
+    for ($index = 1; $index -lt 100; $index++) {
+        $candidate = "$basePath.$index"
+        if (-not (Test-Path -LiteralPath $candidate)) {
+            return $candidate
+        }
+    }
+    throw "No available backup path near $basePath"
+}
+
+function Replace-InstallTree {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceDir,
+        [Parameter(Mandatory = $true)][string]$TargetDir
+    )
+    $parent = Split-Path -Parent $TargetDir
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    $oldDir = Get-AvailableBackupPath "$TargetDir.old"
+    if (Test-Path -LiteralPath $TargetDir) {
+        Rename-Item -LiteralPath $TargetDir -NewName (Split-Path -Leaf $oldDir) -ErrorAction Stop
+    }
+    try {
+        New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
+        Copy-Item -Path (Join-Path $SourceDir '*') -Destination $TargetDir -Recurse -Force -ErrorAction Stop
+    } catch {
+        Remove-Item -LiteralPath $TargetDir -Recurse -Force -ErrorAction SilentlyContinue
+        if ((Test-Path -LiteralPath $oldDir) -and -not (Test-Path -LiteralPath $TargetDir)) {
+            Rename-Item -LiteralPath $oldDir -NewName (Split-Path -Leaf $TargetDir) -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+    Remove-Item -LiteralPath $oldDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 try {
     if (-not (Test-Path -LiteralPath $SourceExe)) {
         throw "Missing payload file: $SourceExe"
@@ -114,9 +171,8 @@ try {
 
     $options = Show-InstallOptions
     Stop-InstalledApp
-
-    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    Copy-Item -LiteralPath $SourceExe -Destination $TargetExe -Force
+    Clear-PyInstallerTemp
+    Replace-InstallTree -SourceDir $PayloadDir -TargetDir $InstallDir
 
     New-Item -ItemType Directory -Force -Path $StartMenuDir | Out-Null
     New-Shortcut -Path $StartMenuShortcut -Target $TargetExe -WorkingDirectory $InstallDir

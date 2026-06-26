@@ -104,25 +104,8 @@ def check_for_updates(
     if latest_version == _normalize_version(skipped_version):
         return UpdateCheckResult(configured=True, latest_version=latest_version, skipped=True)
     body = str(payload.get("body") or "")
-    asset = _select_windows_exe_asset(payload.get("assets", []), body)
+    asset = _select_windows_installer_asset(payload.get("assets", []), body)
     if not is_newer_version(latest_version, current_version):
-        if (
-            latest_version == _normalize_version(current_version)
-            and asset is not None
-            and _asset_differs_from_current_exe(asset)
-        ):
-            result = UpdateCheckResult(
-                configured=True,
-                update_available=True,
-                latest_version=latest_version,
-                release_name=str(payload.get("name") or latest_version),
-                release_url=str(payload.get("html_url") or ""),
-                body=body,
-                asset=asset,
-                message="Release asset differs from installed exe.",
-            )
-            _save_cached_update_check(owner, repo, result)
-            return result
         result = UpdateCheckResult(
             configured=True,
             latest_version=latest_version,
@@ -141,7 +124,7 @@ def check_for_updates(
         release_url=str(payload.get("html_url") or ""),
         body=body,
         asset=asset,
-        message="Update available." if asset else "Release has no .exe asset.",
+        message="Update available." if asset else "Release has no Windows installer asset.",
     )
     _save_cached_update_check(owner, repo, result)
     return result
@@ -197,7 +180,10 @@ def download_update_asset(
                 handle.write(chunk)
                 downloaded += len(chunk)
                 if progress_callback and asset.size:
-                    progress_callback(min(99, round(downloaded * 100 / asset.size)), f"Скачано {downloaded}/{asset.size} байт")
+                    progress_callback(
+                        min(99, round(downloaded * 100 / asset.size)),
+                        f"Downloaded {downloaded}/{asset.size} bytes",
+                    )
 
     actual_size = target.stat().st_size
     if asset.size and actual_size != asset.size:
@@ -209,69 +195,52 @@ def download_update_asset(
             target.unlink(missing_ok=True)
             raise UpdateError("Downloaded SHA256 does not match release notes.")
     if progress_callback:
-        progress_callback(100, "Файл скачан")
+        progress_callback(100, "File downloaded")
     return target
 
 
-def install_downloaded_update(downloaded_exe: Path, *, current_exe: Path | None = None) -> Path:
-    """Launch a small bat script that swaps the running packaged executable."""
+def install_downloaded_update(downloaded_installer: Path, *, current_exe: Path | None = None) -> Path:
+    """Launch the downloaded Inno Setup installer in silent update mode."""
 
     current = current_exe or Path(sys.executable)
     if current.suffix.lower() != ".exe" or current.name.lower() in {"python.exe", "pythonw.exe"}:
-        raise UpdateError("Automatic replacement is available only in the packaged .exe build.")
-    if not downloaded_exe.exists():
-        raise UpdateError(f"Downloaded update not found: {downloaded_exe}")
+        raise UpdateError("Automatic installer update is available only in the packaged .exe build.")
+    if not downloaded_installer.exists():
+        raise UpdateError(f"Downloaded update installer not found: {downloaded_installer}")
+    if downloaded_installer.suffix.lower() != ".exe":
+        raise UpdateError("Automatic update requires the Windows setup executable release asset.")
 
-    staged = current.with_name(current.stem + "_new.exe")
-    if downloaded_exe.resolve() != staged.resolve():
-        staged.write_bytes(downloaded_exe.read_bytes())
-    script = current.with_name("apply_pc_optimizer_lite_update.ps1")
-    script.write_text(_replacement_script(current=current, staged=staged, pid=os.getpid()), encoding="utf-8")
+    temp_dir = Path(tempfile.gettempdir())
     creation_flags = 0
     if os.name == "nt":
-        creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+        creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
+            subprocess,
+            "DETACHED_PROCESS",
+            0,
+        )
+    os.chdir(temp_dir)
     subprocess.Popen(
         [
-            "powershell.exe",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-File",
-            str(script),
+            str(downloaded_installer),
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
         ],
-        cwd=str(current.parent),
+        cwd=str(temp_dir),
         creationflags=creation_flags,
         close_fds=True,
     )
-    return script
+    return downloaded_installer
 
 
 def download_and_install_update(asset: ReleaseAsset, progress_callback: Callable[[int, str], None] | None = None) -> Path:
-    """Download an asset and stage replacement for the current executable."""
+    """Download the setup asset and launch it for a silent in-place update."""
 
     downloaded = download_update_asset(asset, progress_callback=progress_callback)
     return install_downloaded_update(downloaded)
 
 
-def _asset_differs_from_current_exe(asset: ReleaseAsset) -> bool:
-    """Detect same-version republished exe assets for packaged builds."""
-
-    current = Path(sys.executable)
-    if current.suffix.lower() != ".exe" or current.name.lower() in {"python.exe", "pythonw.exe"}:
-        return False
-    try:
-        if asset.sha256:
-            return _sha256_file(current).lower() != asset.sha256.lower()
-        if asset.size:
-            return current.stat().st_size != asset.size
-    except OSError:
-        return False
-    return False
-
-
-def _select_windows_exe_asset(raw_assets: Any, release_body: str) -> ReleaseAsset | None:
+def _select_windows_installer_asset(raw_assets: Any, release_body: str) -> ReleaseAsset | None:
     if not isinstance(raw_assets, list):
         return None
     hashes = _sha256_hashes_from_text(release_body)
@@ -281,7 +250,10 @@ def _select_windows_exe_asset(raw_assets: Any, release_body: str) -> ReleaseAsse
             continue
         name = str(item.get("name") or "")
         url = str(item.get("browser_download_url") or "")
-        if not name.lower().endswith(".exe") or not url:
+        lowered = name.lower()
+        if not lowered.endswith(".exe") or not url:
+            continue
+        if "setup" not in lowered and "installer" not in lowered:
             continue
         candidates.append(
             ReleaseAsset(
@@ -293,12 +265,18 @@ def _select_windows_exe_asset(raw_assets: Any, release_body: str) -> ReleaseAsse
         )
     if not candidates:
         return None
-    preferred = [
-        asset
-        for asset in candidates
-        if "setup" not in asset.name.lower() and "installer" not in asset.name.lower()
-    ]
-    return (preferred or candidates)[0]
+    candidates.sort(key=lambda asset: _installer_asset_score(asset.name))
+    return candidates[0]
+
+
+def _installer_asset_score(name: str) -> tuple[int, int, int, str]:
+    lowered = name.lower()
+    return (
+        0 if "pc-optimizer-lite" in lowered or "pc optimizer lite" in lowered else 1,
+        0 if "setup" in lowered else 1,
+        0 if "windows" in lowered or "win" in lowered or "x64" in lowered else 1,
+        lowered,
+    )
 
 
 def _load_cached_update_check() -> dict[str, Any]:
@@ -360,9 +338,10 @@ def _result_from_cache(
         if asset_payload
         else None
     )
-    update_available = bool(cache.get("update_available")) and (
-        is_newer_version(latest_version, current_version)
-        or (asset is not None and latest_version == _normalize_version(current_version) and _asset_differs_from_current_exe(asset))
+    asset_is_installer = asset is not None and asset.name.lower().endswith(".exe")
+    update_available = bool(cache.get("update_available")) and asset_is_installer and is_newer_version(
+        latest_version,
+        current_version,
     )
     return UpdateCheckResult(
         configured=bool(cache.get("configured")),
@@ -389,136 +368,15 @@ def _sha256_hashes_from_text(text: str) -> dict[str, str]:
     generic = re.search(r"sha256\s*[:=]\s*([a-fA-F0-9]{64})", text, flags=re.IGNORECASE)
     if generic:
         hashes["*"] = generic.group(1)
-    for match in re.finditer(r"([A-Za-z0-9._ -]+\.exe).*?([a-fA-F0-9]{64})", text, flags=re.IGNORECASE | re.DOTALL):
-        hashes[match.group(1).strip().lower()] = match.group(2)
+    for line in text.splitlines():
+        match = re.search(
+            r"([A-Za-z0-9._ -]+\.(?:zip|exe))\s+sha256\s*[:=]\s*([a-fA-F0-9]{64})",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            hashes[match.group(1).strip().lower()] = match.group(2)
     return hashes
-
-
-def _replacement_script(*, current: Path, staged: Path, pid: int) -> str:
-    old = _ps_quote(str(current))
-    new = _ps_quote(str(staged))
-    workdir = _ps_quote(str(current.parent))
-    log_path = _ps_quote(str(current.with_name("pc_optimizer_lite_update.log")))
-    return (
-        "$ErrorActionPreference = 'Stop'\n"
-        f"$old = {old}\n"
-        f"$new = {new}\n"
-        f"$pidToWait = {pid}\n"
-        f"$workdir = {workdir}\n"
-        f"$logPath = {log_path}\n"
-        "function Write-UpdateLog([string]$message) {\n"
-        "    try { Add-Content -LiteralPath $logPath -Encoding UTF8 -Value \"$(Get-Date -Format o) $message\" } catch { }\n"
-        "}\n"
-        "function Get-ProcessesByExecutablePath([string]$path) {\n"
-        "    @(Get-Process -ErrorAction SilentlyContinue | Where-Object {\n"
-        "        try { $_.Path -and ([string]::Equals($_.Path, $path, [StringComparison]::OrdinalIgnoreCase)) } catch { $false }\n"
-        "    })\n"
-        "}\n"
-        "function Stop-ProcessesByExecutablePath([string]$path) {\n"
-        "    foreach ($proc in (Get-ProcessesByExecutablePath $path)) {\n"
-        "        try {\n"
-        "            Stop-Process -Id $proc.Id -Force -ErrorAction Stop\n"
-        "            Write-UpdateLog \"Stopped stale process $($proc.Id) using $path.\"\n"
-        "        } catch { }\n"
-        "    }\n"
-        "}\n"
-        "try {\n"
-        "    Write-UpdateLog 'Updater started.'\n"
-        "    $deadline = (Get-Date).AddSeconds(60)\n"
-        "    while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {\n"
-        "        if ((Get-Date) -gt $deadline) {\n"
-        f"            throw \"Timed out waiting for process {pid} to exit.\"\n"
-        "        }\n"
-        "        Start-Sleep -Milliseconds 300\n"
-        "    }\n"
-        "    Start-Sleep -Milliseconds 700\n"
-        "    $pathReleaseDeadline = (Get-Date).AddSeconds(10)\n"
-        "    while (Get-ProcessesByExecutablePath $old) {\n"
-        "        if ((Get-Date) -gt $pathReleaseDeadline) {\n"
-        "            Stop-ProcessesByExecutablePath $old\n"
-        "            break\n"
-        "        }\n"
-        "        Start-Sleep -Milliseconds 300\n"
-        "    }\n"
-        "    if (-not (Test-Path -LiteralPath $new)) {\n"
-        "        throw \"Staged update file is missing: $new\"\n"
-        "    }\n"
-        "    $replaced = $false\n"
-        "    $lastError = ''\n"
-        "    $backup = \"$old.bak\"\n"
-        "    for ($attempt = 1; $attempt -le 20; $attempt++) {\n"
-        "        try {\n"
-        "            Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n"
-        "            if (Test-Path -LiteralPath $old) {\n"
-        "                Rename-Item -LiteralPath $old -NewName (Split-Path -Leaf $backup) -ErrorAction Stop\n"
-        "            }\n"
-        "            try {\n"
-        "                Move-Item -LiteralPath $new -Destination $old -ErrorAction Stop\n"
-        "                for ($cleanupAttempt = 1; $cleanupAttempt -le 20; $cleanupAttempt++) {\n"
-        "                    Stop-ProcessesByExecutablePath $backup\n"
-        "                    Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n"
-        "                    if (-not (Test-Path -LiteralPath $backup)) { break }\n"
-        "                    Start-Sleep -Milliseconds 500\n"
-        "                }\n"
-        "            } catch {\n"
-        "                $moveError = $_.Exception.Message\n"
-        "                if ((Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $old)) {\n"
-        "                    Rename-Item -LiteralPath $backup -NewName (Split-Path -Leaf $old) -ErrorAction SilentlyContinue\n"
-        "                }\n"
-        "                throw $moveError\n"
-        "            }\n"
-        "            $replaced = $true\n"
-        "            Write-UpdateLog \"Replacement succeeded on attempt $attempt.\"\n"
-        "            break\n"
-        "        } catch {\n"
-        "            $lastError = $_.Exception.Message\n"
-        "            Write-UpdateLog \"Replacement attempt $attempt failed: $lastError\"\n"
-        "            Start-Sleep -Milliseconds ([Math]::Min(1500, 200 * $attempt))\n"
-        "        }\n"
-        "    }\n"
-        "    if (-not $replaced) {\n"
-        "        throw \"Update replacement failed: $lastError\"\n"
-        "    }\n"
-        "    if (-not (Test-Path -LiteralPath $old)) {\n"
-        "        throw \"Updated executable is missing after replacement: $old\"\n"
-        "    }\n"
-        "    Start-Sleep -Milliseconds 500\n"
-        "    Start-Process -FilePath $old -WorkingDirectory $workdir\n"
-        "    $cleanupScript = Join-Path $env:TEMP \"pc_optimizer_lite_update_cleanup_$pidToWait.ps1\"\n"
-        "    $cleanupLines = @(\n"
-        "        '$ErrorActionPreference = ''SilentlyContinue''',\n"
-        "        \"`$backup = '$($backup.Replace(\"'\", \"''\"))'\",\n"
-        "        \"`$logPath = '$($logPath.Replace(\"'\", \"''\"))'\",\n"
-        "        '$removed = $false',\n"
-        "        'for ($attempt = 1; $attempt -le 120; $attempt++) {',\n"
-        "        '    foreach ($proc in @(Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -and ([string]::Equals($_.Path, $backup, [StringComparison]::OrdinalIgnoreCase)) } catch { $false } })) {',\n"
-        "        '        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue',\n"
-        "        '    }',\n"
-        "        '    Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue',\n"
-        "        '    if (-not (Test-Path -LiteralPath $backup)) { $removed = $true; break }',\n"
-        "        '    Start-Sleep -Milliseconds 1000',\n"
-        "        '}',\n"
-        "        'if ($removed) {',\n"
-        "        '    try { Add-Content -LiteralPath $logPath -Encoding UTF8 -Value \"$(Get-Date -Format o) Backup cleanup finished.\" } catch { }',\n"
-        "        '} else {',\n"
-        "        '    try { Add-Content -LiteralPath $logPath -Encoding UTF8 -Value \"$(Get-Date -Format o) Backup cleanup deferred; file is still locked.\" } catch { }',\n"
-        "        '}',\n"
-        "        'Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue'\n"
-        "    )\n"
-        "    Set-Content -LiteralPath $cleanupScript -Encoding UTF8 -Value $cleanupLines\n"
-        "    Start-Process powershell.exe -WindowStyle Hidden -ArgumentList \"-NoProfile -ExecutionPolicy Bypass -File `\"$cleanupScript`\"\"\n"
-        "    Write-UpdateLog 'Updated executable started.'\n"
-        "} catch {\n"
-        "    Write-UpdateLog $_.Exception.Message\n"
-        "    throw\n"
-        "} finally {\n"
-        "    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
-        "}\n"
-    )
-
-
-def _ps_quote(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
 
 
 def _sha256_file(path: Path) -> str:

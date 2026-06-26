@@ -19,6 +19,7 @@ DEFAULT_LOG_FILENAME = "pc_optimizer_lite.log"
 DEFAULT_GITHUB_OWNER = "kot04ka"
 DEFAULT_GITHUB_REPO = "pc-optimizer-lite"
 DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 4.0
+CONFIG_SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +35,7 @@ class HardwareProfile:
 class AppConfig:
     """Runtime settings persisted between application launches."""
 
-    config_version: int = 7
+    config_version: int = CONFIG_SCHEMA_VERSION
     optimal_preset_tier: str = "balanced"
     optimal_preset_applied: bool = False
     monitor_interval_seconds: float = 3.0
@@ -137,6 +138,7 @@ def get_log_path() -> Path:
 def sanitize_config(config: AppConfig) -> AppConfig:
     """Clamp settings that could make the app too noisy or too CPU-heavy."""
 
+    config.config_version = CONFIG_SCHEMA_VERSION
     config.monitor_interval_seconds = max(
         MIN_MONITOR_INTERVAL_SECONDS, float(config.monitor_interval_seconds)
     )
@@ -365,19 +367,47 @@ def load_config(path: Path | None = None) -> AppConfig:
         data: dict[str, Any] = json.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         logging.getLogger(__name__).warning("Failed to load config %s: %s", config_path, exc)
-        return apply_automation_mode(sanitize_config(AppConfig()))
+        return apply_optimal_preset(AppConfig())
 
+    return _config_from_data(data, config_path)
+
+
+def import_config(path: Path) -> AppConfig:
+    """Load a user-selected config export and validate it before applying."""
+
+    try:
+        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot import config {path}: {exc}") from exc
+    return _config_from_data(data, path)
+
+
+def export_config(config: AppConfig, path: Path) -> Path:
+    """Write a portable copy of the current validated configuration."""
+
+    return save_config(config, path)
+
+
+def _config_from_data(data: dict[str, Any], source: Path) -> AppConfig:
     defaults = asdict(AppConfig())
-    data = _migrate_config_data(data)
-    defaults.update({key: value for key, value in data.items() if key in defaults})
-    return apply_automation_mode(sanitize_config(AppConfig(**defaults)))
+    try:
+        data = _migrate_config_data(data)
+        defaults.update({key: value for key, value in data.items() if key in defaults})
+        return apply_automation_mode(sanitize_config(AppConfig(**defaults)))
+    except (TypeError, ValueError) as exc:
+        logging.getLogger(__name__).warning("Invalid config values in %s: %s", source, exc)
+        return apply_optimal_preset(AppConfig())
 
 
 def _migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
     """Apply conservative migrations for older persisted defaults."""
 
     migrated = dict(data)
-    version = int(migrated.get("config_version") or 0)
+    raw_version = migrated.get("config_version", migrated.get("version", 0))
+    try:
+        version = int(raw_version or 0)
+    except (TypeError, ValueError):
+        version = 0
     if version < 2:
         if float(migrated.get("cpu_threshold_percent", 90.0)) == 90.0:
             migrated["cpu_threshold_percent"] = 85.0
@@ -436,7 +466,9 @@ def save_config(config: AppConfig, path: Path | None = None) -> Path:
     config_path = path or get_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
-    payload = json.dumps(asdict(config), indent=2, ensure_ascii=False)
+    payload_data = asdict(config)
+    payload_data["version"] = config.config_version
+    payload = json.dumps(payload_data, indent=2, ensure_ascii=False)
     tmp_path.write_text(payload + "\n", encoding="utf-8")
     tmp_path.replace(config_path)
     return config_path

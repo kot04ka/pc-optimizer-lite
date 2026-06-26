@@ -21,6 +21,10 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --no-progress -y
+
       - name: Build app
         shell: powershell
         run: .\build.bat
@@ -28,22 +32,26 @@ jobs:
       - name: Prepare release notes
         shell: powershell
         run: |
-          $portable = "dist\PC Optimizer Lite.exe"
+          $tag = $env:GITHUB_REF_NAME
+          $version = $tag.TrimStart('v')
+          $onedirZip = "installer_output\PC-Optimizer-Lite-windows-x64.zip"
           $setup = "installer_output\PC-Optimizer-Lite-Setup.exe"
-          $portableHash = (Get-FileHash -LiteralPath $portable -Algorithm SHA256).Hash.ToLowerInvariant()
+          $onedirHash = (Get-FileHash -LiteralPath $onedirZip -Algorithm SHA256).Hash.ToLowerInvariant()
           $setupHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          # Extract changelog entry for this version from README.md
+          $readmeContent = Get-Content 'README.md' -Raw -Encoding UTF8
+          $escapedVersion = [regex]::Escape($version)
+          $pattern = "(?sm)^###\s+$escapedVersion\s*`$\r?\n(.*?)(?=\r?\n^###\s|\Z)"
+          $match = [regex]::Match($readmeContent, $pattern)
+          if ($match.Success) {
+            $changelog = $match.Groups[1].Value.Trim()
+          } else {
+            $changelog = "PC Optimizer Lite $tag"
+          }
           $notes = @(
-            "Hot-fix: fixed input lag in Telegram, Discord, browsers, editors, and other interactive apps while the optimizer is running.",
+            $changelog,
             "",
-            "Changes:",
-            "- CPU priority/affinity relief now skips the active window, visible interactive apps, and known messengers/browsers/editors.",
-            "- Previously applied CPU limits are restored immediately when the user focuses the affected app.",
-            "- Startup is softer: monitoring starts after a delay, the first heavy process-table refresh is deferred, and update checks no longer start together with the GUI.",
-            "- Confirmed: no global keyboard/mouse hooks are used; user activity is checked with GetLastInputInfo().",
-            "",
-            "PC-Optimizer-Lite.exe sha256: $portableHash",
-            "PC.Optimizer.Lite.exe sha256: $portableHash",
-            "PC Optimizer Lite.exe sha256: $portableHash",
+            "PC-Optimizer-Lite-windows-x64.zip sha256: $onedirHash",
             "PC-Optimizer-Lite-Setup.exe sha256: $setupHash"
           ) -join [Environment]::NewLine
           $notes | Set-Content -LiteralPath RELEASE_NOTES.md -Encoding UTF8
@@ -60,13 +68,14 @@ jobs:
           $ErrorActionPreference = "Stop"
           if (-not $releaseExists) {
             gh release create $tag `
-              "dist\PC Optimizer Lite.exe#PC-Optimizer-Lite.exe" `
+              "installer_output\PC-Optimizer-Lite-windows-x64.zip#PC-Optimizer-Lite-windows-x64.zip" `
               "installer_output\PC-Optimizer-Lite-Setup.exe#PC-Optimizer-Lite-Setup.exe" `
               --title "PC Optimizer Lite $tag" `
               --notes-file RELEASE_NOTES.md
           } else {
             gh release upload $tag `
-              "dist\PC Optimizer Lite.exe#PC-Optimizer-Lite.exe" `
+              "installer_output\PC-Optimizer-Lite-windows-x64.zip#PC-Optimizer-Lite-windows-x64.zip" `
               "installer_output\PC-Optimizer-Lite-Setup.exe#PC-Optimizer-Lite-Setup.exe" `
               --clobber
+            gh release edit $tag --notes-file RELEASE_NOTES.md
           }

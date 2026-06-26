@@ -46,7 +46,7 @@ python main.py
 
 Если `plyer` недоступен, уведомления будут просто записываться в лог.
 
-## Упаковка в exe
+## Упаковка
 
 ```powershell
 .\build.bat
@@ -55,44 +55,43 @@ python main.py
 Скрипт сборки:
 
 - генерирует иконку `assets\pc_optimizer_lite.ico`;
-- собирает portable one-file EXE через PyInstaller без консольного окна;
-- собирает onedir-папку для установщика, чтобы установленная версия не распаковывалась в `%TEMP%\_MEI` при каждом запуске;
-- включает hidden imports для PySide GUI, уведомлений, pywin32/WMI и внутренних модулей `autostart`, `optimize_action`, `ram_cleaner`, `cpu_optimizer`, `cpu_throttler`, `sleep_manager`, `history_manager`;
-- пытается собрать установщик через Inno Setup (`installer\PC Optimizer Lite.iss`), а если `iscc.exe` не установлен, собирает отдельный PyInstaller-based setup exe с чекбоксами установки.
+- собирает onedir-папку PyInstaller, чтобы приложение не распаковывалось в `%TEMP%\_MEI` при запуске;
+- собирает `PC-Optimizer-Lite-windows-x64.zip` как portable/diagnostic onedir-архив;
+- включает hidden imports для PySide GUI, уведомлений, pywin32/WMI и внутренних модулей `autostart`, `optimize_action`, `ram_cleaner`, `cpu_optimizer`, `cpu_throttler`, `sleep_manager`, `safety.activity_detector`, `history_manager`;
+- собирает установщик через Inno Setup (`installer\PC Optimizer Lite.iss`), который ставит всю onedir-папку в `%LOCALAPPDATA%\Programs\PC Optimizer Lite`.
+
+Для локальной сборки setup exe нужен установленный Inno Setup 6 (`iscc.exe`). GitHub Actions workflow устанавливает Inno Setup перед релизной сборкой автоматически.
 
 ## Автообновления через GitHub
 
 Приложение по умолчанию проверяет GitHub Releases репозитория `kot04ka/pc-optimizer-lite`.
 Для публикации новой версии:
 
-- соберите portable exe через `.\build.bat`;
-- создайте GitHub Release с tag вида `v1.3.5` или выше текущей версии;
-- прикрепите assets `PC-Optimizer-Lite.exe` и `PC-Optimizer-Lite-Setup.exe`;
-- добавьте в описание релиза строки `PC-Optimizer-Lite.exe sha256: <хэш>` и `PC-Optimizer-Lite-Setup.exe sha256: <хэш>`.
+- соберите onedir ZIP и установщик через `.\build.bat`;
+- создайте GitHub Release с tag вида `v1.3.9` или выше текущей версии;
+- прикрепите assets `PC-Optimizer-Lite-windows-x64.zip` и `PC-Optimizer-Lite-Setup.exe`;
+- добавьте в описание релиза строки `PC-Optimizer-Lite-windows-x64.zip sha256: <хэш>` и `PC-Optimizer-Lite-Setup.exe sha256: <хэш>`.
 
 Репозиторий публичный, поэтому токен не нужен: приложение читает GitHub Releases API без авторизации. В пользовательских настройках нет полей owner/repo/token; для пользователя остаётся одна кнопка "Проверить обновления", которая меняется на "Обновить до X.X", когда найден новый релиз.
 
-Если exe в релизе заменён без смены версии, packaged приложение всё равно покажет кнопку обновления, когда sha256 из описания релиза или размер asset отличается от установленного exe.
+Автообновление скачивает `PC-Optimizer-Lite-Setup.exe`, проверяет размер и sha256 до запуска, стартует установщик из `%TEMP%` в тихом режиме `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` и сразу закрывает приложение. Замену файлов выполняет Inno Setup с `CloseApplications=yes` и `RestartApplications=yes`; самописная замена/переименование папки приложения не используется.
 
-Если установленная версия уже не запускается с ошибкой `Failed to load Python DLL ... _MEI...\python312.dll`, автообновление из приложения невозможно. Нужно вручную скачать `PC-Optimizer-Lite-Setup.exe` из GitHub Releases и установить поверх старой версии.
+Если установленная версия уже не запускается с ошибкой `_PYI_APPLICATION_HOME_DIR environment variable is not defined!` / `Failed to load Python DLL ... _MEI...\python311.dll/python312.dll` или зацикленно предлагает `1.3.8`, автообновление из этой версии невозможно. Нужно один раз вручную скачать `PC-Optimizer-Lite-Setup.exe` из GitHub Releases и установить поверх старой версии. После этого следующие автообновления будут идти через исправленный установщик. Если PyInstaller-ошибка осталась, удалите папки `_MEI*` из `%TEMP%` вручную и переустановите.
 
 ## Готовая сборка
 
-Версия: `1.3.5`
+Версия: `1.3.9`
 
-Дата сборки: `2026-06-25`
+Дата сборки: `2026-06-26`
 
-Portable EXE:
-
-```text
-C:\Users\1\Documents\CleenChile\dist\PC Optimizer Lite.exe
-```
-
-Установщик:
+Артефакты локальной сборки (`.\build.bat`) находятся в:
 
 ```text
-C:\Users\1\Documents\CleenChile\installer_output\PC-Optimizer-Lite-Setup.exe
+installer_output\PC-Optimizer-Lite-windows-x64.zip
+installer_output\PC-Optimizer-Lite-Setup.exe
 ```
+
+> **Важно:** SHA256-хэши, публикуемые на GitHub Releases, отличаются от хэшей локальной сборки — PyInstaller не даёт воспроизводимых бинарников. Авторитетные хэши для проверки скачанного файла всегда берутся из тела GitHub Release (туда их записывает CI-workflow).
 
 Команда пересборки с нуля из корня проекта:
 
@@ -102,11 +101,18 @@ C:\Users\1\Documents\CleenChile\installer_output\PC-Optimizer-Lite-Setup.exe
 
 Установщик ставит приложение в пользовательскую папку `%LOCALAPPDATA%\Programs\PC Optimizer Lite`, создаёт ярлык в меню "Пуск", опционально создаёт ярлык на рабочем столе и может включить автозапуск через `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` с флагом `--tray`.
 
-Неподписанный EXE может вызвать предупреждение Windows Defender SmartScreen. Для публичного распространения лучше подписать файл кодовым сертификатом; для локального использования можно подтвердить запуск вручную.
+Неподписанный EXE может вызвать предупреждение Windows Defender SmartScreen. Приложение и установщик не отключают Windows Defender, антивирусы или другие средства защиты. Для публичного распространения лучше подписать файл кодовым сертификатом; для локального использования можно подтвердить запуск вручную.
+
+## Контроль производительности 1.3.8
+
+Замер выполнен 2026-06-26 на собранном onedir EXE в tray-режиме (`--tray`).
+CPU считался по дельте process CPU за 30 секунд и нормализован на логические ядра.
+
+- Tray idle: `0.026% CPU`, RSS `121.4 MB`.
 
 ## Контроль производительности 1.2.0
 
-Замер выполнен 2026-06-23 на собранном portable EXE `dist\PC Optimizer Lite.exe`.
+Замер выполнен 2026-06-23 на собранном приложении.
 CPU считался по дельте `Get-Process.CPU` за 30 секунд и нормализован на 8 логических процессоров.
 
 - Окно открыто, простой: рабочий процесс `0.83% CPU`, PyInstaller-wrapper `0.02% CPU`.
@@ -114,6 +120,40 @@ CPU считался по дельте `Get-Process.CPU` за 30 секунд и
 - Главные устранённые причины прежних ~15% CPU: постоянный обход процессов, дублирующий process refresh, отдельный repaint-таймер графика, температурные WMI/sensor-probes на системе без датчиков и отсутствие фонового low-power режима при `--tray`.
 
 ## Changelog
+
+### 1.3.9
+
+- Hot-fix: исправлено зацикленное обновление после `1.3.8`.
+- Автообновление теперь скачивает и проверяет `PC-Optimizer-Lite-Setup.exe`, запускает Inno Setup из `%TEMP%` в тихом режиме и сразу закрывает приложение.
+- Убраны самописный `apply_pc_optimizer_lite_update.ps1`, переименование/перемещение занятой папки приложения из updater'а и блокирующий `QMessageBox` перед выходом.
+- Inno Setup настроен на `CloseApplications=yes` и `RestartApplications=yes`; silent install запускает обновлённое приложение.
+- Пользователям, застрявшим на `1.3.8`, нужно один раз обновиться вручную установщиком; дальше автообновление будет работать по новому flow.
+- Windows Defender, антивирусы и системные настройки защиты не отключаются и не изменяются.
+
+### 1.3.8
+
+- Hot-fix: настройки теперь полностью сохраняются в `%APPDATA%\PC Optimizer Lite\config.json` со schema version; битый или отсутствующий config безопасно возвращает оптимальный пресет.
+- Добавлены экспорт, импорт и сброс настроек с валидацией/clamping; импорт применяет настройки без перезапуска и не ломает whitelist.
+- Проверены авто-триггеры RAM, CPU ProBalance, periodic optimization и quiet/autopilot notifications; добавлены регрессионные тесты.
+- Sleep mode проверен unit-тестами и реальным Notepad `/new` smoke: оконные приложения получают `priority sleep`, deep suspend остаётся только для headless-safe кандидатов, клик/курсор будят процесс.
+- Убраны тёмные подложки у подписей; настройки получили более понятные формулировки и подсказки.
+- Windows Defender, антивирусы и системные настройки защиты не отключаются и не изменяются.
+
+### 1.3.7
+
+- Hot-fix sleep-mode: оконные приложения и редакторы с риском несохранённых данных переводятся в мягкий `priority sleep`, без `suspend()`.
+- Глубокий `suspend` оставлен только для headless-safe кандидатов; выбранная стратегия отображается во вкладке "Активность".
+- Добавлен лёгкий wake polling через `GetForegroundWindow` и окно под курсором; пробуждение не ждёт полного sleep-цикла и не использует input hooks.
+- Правила выбора стратегии вынесены в `pc_optimizer_lite.safety.activity_detector`, чтобы политика активности не жила в UI.
+- Добавлены регрессионные тесты для Notepad/windowed sleep, foreground-related wake, cursor wake и unsaved title.
+
+### 1.3.6
+
+- Hot-fix: полный переход основного канала распространения и обновления на onedir-сборку.
+- Устранены причины ошибок `_PYI_APPLICATION_HOME_DIR environment variable is not defined!` и `Failed to load Python DLL ... _MEI...\python311.dll/python312.dll` после обновления.
+- Апдейтер скачивает onedir ZIP, проверяет размер и sha256 до применения, ждёт закрытия текущего процесса по PID и заменяет папку приложения целиком.
+- Установщик ставит чистую onedir-папку поверх старой установки, удаляет старые файлы предыдущей версии и best-effort чистит stale `_MEI*` в `%TEMP%`.
+- Windows Defender, антивирусы и системные настройки защиты не отключаются и не изменяются.
 
 ### 1.3.5
 
@@ -126,8 +166,8 @@ CPU считался по дельте `Get-Process.CPU` за 30 секунд и
 ### 1.3.4
 
 - Hot-fix: усилен updater после ошибки `Failed to load Python DLL ... _MEI...\python312.dll` при автообновлении.
-- Скрипт замены exe ждёт завершения старого PID с timeout, повторяет замену при Windows file lock и запускает новую версию только после успешного `Move-Item`.
-- Установщик переведён на onedir payload; portable onefile остаётся отдельным asset.
+- Скрипт обновления ждёт завершения старого PID с timeout, повторяет замену при Windows file lock и запускает новую версию только после успешного `Move-Item`.
+- Установщик начал получать onedir payload; полный переход основного канала обновления на onedir выполнен в 1.3.6.
 - Добавлен оптимальный пресет по умолчанию и кнопка сброса к нему без авто-закрытия процессов.
 - Добавлены read-only рекомендации по файлу подкачки и явная кнопка возврата к автоматическому управлению Windows.
 
@@ -155,7 +195,7 @@ CPU считался по дельте `Get-Process.CPU` за 30 секунд и
 - Добавлен режим слабого ПК: редкие опросы, упрощённый график, меньший буфер точек и более длинные паузы между шагами.
 - One-click оптимизация стала пошаговой: UI показывает текущий шаг, прогресс и корректно останавливается после текущего шага.
 - Ручная RAM/temp очистка, обновление таблицы процессов и проверка обновлений вынесены в worker-потоки.
-- Добавлен updater GitHub Releases для `kot04ka/pc-optimizer-lite`: баннер "Обновить", фоновая проверка, кэш запросов, optional token для приватного repo, скачивание и bat-замена exe.
+- Добавлен updater GitHub Releases для `kot04ka/pc-optimizer-lite`: баннер "Обновить", фоновая проверка, кэш запросов и optional token для приватного repo.
 - Добавлены RELEASE.md и GitHub Actions workflow для будущих релизов.
 
 ### 1.2.0

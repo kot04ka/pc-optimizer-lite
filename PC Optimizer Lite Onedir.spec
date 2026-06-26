@@ -20,6 +20,7 @@ a = Analysis(
         'pc_optimizer_lite.pagefile',
         'pc_optimizer_lite.process_safety',
         'pc_optimizer_lite.ram_cleaner',
+        'pc_optimizer_lite.safety.activity_detector',
         'pc_optimizer_lite.sleep_manager',
         'pc_optimizer_lite.smart_process_manager',
         'pc_optimizer_lite.updater',
