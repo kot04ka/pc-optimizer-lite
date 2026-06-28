@@ -40,6 +40,22 @@ class HealthStatus:
     detail: str
 
 
+@dataclass(frozen=True)
+class SettingsLayoutPolicy:
+    nav_width: int
+    field_max_width: int
+    min_content_width: int
+
+
+SETTINGS_LAYOUT = SettingsLayoutPolicy(
+    nav_width=164,
+    field_max_width=340,
+    min_content_width=0,
+)
+
+TOPBAR_ACTIONS_LABEL = "Действия"
+
+
 PROMPT_DARK_TOKENS = DesignTokens(
     background="#0B1017",
     surface="#121A25",

@@ -48,6 +48,8 @@ from pc_optimizer_lite.runtime_policy import sleep_wake_poll_policy
 from pc_optimizer_lite.ui_model import (
     DEFAULT_NAV_PAGES,
     PROMPT_DARK_TOKENS,
+    SETTINGS_LAYOUT,
+    TOPBAR_ACTIONS_LABEL,
     build_design_palette,
     evaluate_system_health,
 )
@@ -80,6 +82,12 @@ class UiModelTests(unittest.TestCase):
         self.assertEqual(warning.severity, "warn")
         self.assertEqual(danger.severity, "bad")
         self.assertIn("Нагрузка", danger.title)
+
+    def test_settings_layout_avoids_horizontal_overflow(self) -> None:
+        self.assertLessEqual(SETTINGS_LAYOUT.field_max_width, 360)
+        self.assertLessEqual(SETTINGS_LAYOUT.nav_width, 168)
+        self.assertEqual(SETTINGS_LAYOUT.min_content_width, 0)
+        self.assertEqual(TOPBAR_ACTIONS_LABEL, "Действия")
 
 
 class ConfigTests(unittest.TestCase):
@@ -1256,6 +1264,15 @@ class RuntimePolicyTests(unittest.TestCase):
 
 
 class VisualEffectsTests(unittest.TestCase):
+    def test_low_power_effect_set_covers_common_windows_animations(self) -> None:
+        names = {setting.name for setting in VISUAL_EFFECT_SETTINGS}
+
+        self.assertGreaterEqual(len(names), 12)
+        self.assertIn("ui_effects", names)
+        self.assertIn("menu_fade", names)
+        self.assertIn("tooltip_fade", names)
+        self.assertIn("drop_shadow", names)
+
     def test_visual_effects_manager_restores_captured_values(self) -> None:
         class FakeAdapter:
             available = True

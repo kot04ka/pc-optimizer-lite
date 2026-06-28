@@ -74,7 +74,7 @@ from .ram_cleaner import MEMORY_PURGE_STANDBY_LIST, RamCleanMode, RamCleaner, Ra
 from .runtime_policy import sleep_wake_poll_policy
 from .sleep_manager import SleepAction, SleepManager
 from .smart_process_manager import CloseCandidate, SmartProcessManager
-from .ui_model import DEFAULT_NAV_PAGES, build_design_palette, evaluate_system_health
+from .ui_model import DEFAULT_NAV_PAGES, SETTINGS_LAYOUT, TOPBAR_ACTIONS_LABEL, build_design_palette, evaluate_system_health
 from .updater import UpdateCheckResult, UpdateError, check_for_updates, download_and_install_update, is_repository_configured
 from .version import APP_VERSION
 from .visual_effects import VisualEffectsManager
@@ -910,20 +910,23 @@ class PCOptimizerQtWindow(QMainWindow):
         layout.addWidget(self.topbar_status_label)
         layout.addWidget(_button("В трей", "minimize", self.hide_to_tray, self.palette))
 
-        menu_button = QToolButton()
-        menu_button.setObjectName("TopbarMenuButton")
-        menu_button.setText("...")
-        menu_button.setToolTip("Дополнительные действия")
-        menu = QMenu(menu_button)
-        refresh_action = QAction(_feather_icon("refresh", self.palette["accent"]), "Проверить обновления", menu_button)
+        self.topbar_menu_button = QToolButton()
+        self.topbar_menu_button.setObjectName("TopbarMenuButton")
+        self.topbar_menu_button.setText(TOPBAR_ACTIONS_LABEL)
+        self.topbar_menu_button.setIcon(_feather_icon("settings", self.palette["accent"]))
+        self.topbar_menu_button.setIconSize(QSize(16, 16))
+        self.topbar_menu_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.topbar_menu_button.setToolTip("Дополнительные действия")
+        menu = QMenu(self.topbar_menu_button)
+        refresh_action = QAction(_feather_icon("refresh", self.palette["accent"]), "Проверить обновления", self.topbar_menu_button)
         refresh_action.triggered.connect(self.check_updates_now)
-        settings_action = QAction(_feather_icon("settings", self.palette["accent"]), "Открыть настройки", menu_button)
+        settings_action = QAction(_feather_icon("settings", self.palette["accent"]), "Открыть настройки", self.topbar_menu_button)
         settings_action.triggered.connect(lambda: self._switch_page("settings"))
         menu.addAction(refresh_action)
         menu.addAction(settings_action)
-        menu_button.setMenu(menu)
-        menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        layout.addWidget(menu_button)
+        self.topbar_menu_button.setMenu(menu)
+        self.topbar_menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        layout.addWidget(self.topbar_menu_button)
         return topbar
 
     def _add_shell_page(self, page_id: str, widget: QWidget) -> None:
@@ -1298,7 +1301,7 @@ class PCOptimizerQtWindow(QMainWindow):
 
         settings_nav = QFrame()
         settings_nav.setObjectName("SettingsNav")
-        settings_nav.setFixedWidth(180)
+        settings_nav.setFixedWidth(SETTINGS_LAYOUT.nav_width)
         self.settings_nav_layout = QVBoxLayout(settings_nav)
         self.settings_nav_layout.setContentsMargins(10, 10, 10, 10)
         self.settings_nav_layout.setSpacing(6)
@@ -1307,11 +1310,15 @@ class PCOptimizerQtWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setObjectName("SettingsScroll")
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.settings_scroll = scroll
         content = QWidget()
+        content.setObjectName("SettingsContent")
+        content.setMinimumWidth(SETTINGS_LAYOUT.min_content_width)
+        content.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(2, 2, 10, 2)
-        content_layout.setSpacing(18)
+        content_layout.setContentsMargins(0, 0, 8, 0)
+        content_layout.setSpacing(14)
 
         self.theme_combo = QComboBox()
         self.theme_combo.addItem("Тёмная", "dark")
@@ -1332,7 +1339,7 @@ class PCOptimizerQtWindow(QMainWindow):
         )
         self.automation_mode_combo.currentIndexChanged.connect(lambda *_: self._preview_automation_mode())
 
-        self.observation_only_check = _toggle("Режим только наблюдения: запретить авто-действия")
+        self.observation_only_check = _toggle("Только наблюдение")
         self.observation_only_check.setChecked(self.config.observation_only_mode)
         self.observation_only_check.setToolTip("Отключает автоматическую RAM-очистку, CPU ProBalance, sleep mode и автоочистку.")
         self.autostart_check = _toggle("Запускать с Windows")
@@ -1356,13 +1363,14 @@ class PCOptimizerQtWindow(QMainWindow):
         self.ram_threshold_edit.setToolTip("Порог уведомления о высокой RAM. Автоочистка использует отдельный порог ниже.")
         self.cooldown_edit.setToolTip("Минимальная пауза между одинаковыми уведомлениями и авто-действиями.")
         self.max_priority_edit.setToolTip("Ограничивает, сколько процессов можно смягчить за один цикл.")
-        self.auto_priority_check = _toggle("Автоматически снижать приоритет тяжёлых процессов")
+        self.auto_priority_check = _toggle("Автоматически снижать приоритет")
         self.auto_priority_check.setChecked(self.config.auto_lower_priority_enabled)
         self.auto_priority_check.setToolTip("Мягкий fallback: снижает priority только у безопасных фоновых кандидатов.")
-        self.visual_effects_check = _toggle("Отключать визуальные эффекты Windows в low-power режиме")
+        self.visual_effects_check = _toggle("Авто-отключать эффекты Windows")
         self.visual_effects_check.setChecked(self.config.visual_effects_low_power_enabled)
         self.visual_effects_check.setToolTip(
-            "Временно отключает часть анимаций Windows и восстанавливает исходные значения при выходе."
+            "В low-power режиме временно отключает анимации, fade, тени и UI effects Windows. "
+            "Исходные значения восстанавливаются при выключении опции или выходе."
         )
 
         self.auto_close_combo = QComboBox()
@@ -1380,19 +1388,19 @@ class PCOptimizerQtWindow(QMainWindow):
         self.close_ram_edit.setToolTip("Кандидат на закрытие должен быть не ниже этого RAM-порога.")
         self.close_duplicates_edit.setToolTip("Сколько копий одного процесса должно быть найдено перед проверкой дублей.")
 
-        self.sleep_enabled_check = _toggle("Мягко усыплять давно неактивные окна")
+        self.sleep_enabled_check = _toggle("Усыплять неактивные окна")
         self.sleep_enabled_check.setChecked(self.config.sleep_enabled)
         self.sleep_after_edit = QLineEdit(str(self.config.sleep_after_minutes))
         self.sleep_check_edit = QLineEdit(str(self.config.sleep_check_seconds))
         self.sleep_enabled_check.setToolTip("Оконные приложения получают priority sleep; deep suspend используется только для безопасных headless-кандидатов.")
         self.sleep_after_edit.setToolTip("Сколько минут окно должно быть неактивным перед sleep mode.")
         self.sleep_check_edit.setToolTip("Как часто проверять кандидатов и пробуждать окно под курсором/фокусом.")
-        self.ram_auto_clean_check = _toggle("Автоматически чистить RAM лёгким режимом")
+        self.ram_auto_clean_check = _toggle("Автоочистка RAM")
         self.ram_auto_clean_check.setChecked(self.config.ram_auto_clean_enabled)
         self.ram_auto_threshold_edit = QLineEdit(str(self.config.ram_auto_clean_threshold_percent))
         self.ram_auto_clean_check.setToolTip("Без закрытия приложений: просит Windows выгрузить неиспользуемые страницы памяти.")
         self.ram_auto_threshold_edit.setToolTip("RAM-порог, после которого запускается лёгкая автоочистка.")
-        self.cpu_optimizer_check = _toggle("CPU ProBalance: снижать влияние тяжёлых процессов")
+        self.cpu_optimizer_check = _toggle("CPU ProBalance")
         self.cpu_optimizer_check.setChecked(self.config.cpu_optimizer_enabled)
         self.cpu_optimizer_priority_combo = QComboBox()
         self.cpu_optimizer_priority_combo.addItem("Ниже обычного", "below_normal")
@@ -1411,14 +1419,14 @@ class PCOptimizerQtWindow(QMainWindow):
         self.cpu_optimizer_affinity_ratio_edit.setToolTip("Доля доступных ядер, которую оставить тяжёлому процессу при affinity-ограничении.")
         self.cpu_optimizer_min_cores_edit.setToolTip("Нижняя граница ядер, которые всегда остаются процессу.")
         self.cpu_optimizer_restore_edit.setToolTip("Через сколько секунд вернуть priority/affinity обратно.")
-        self.cpu_throttle_check = _toggle("Автоматически включать CPU ProBalance при устойчивой нагрузке")
+        self.cpu_throttle_check = _toggle("Авто CPU ProBalance при нагрузке")
         self.cpu_throttle_check.setChecked(self.config.cpu_throttle_enabled)
         self.cpu_throttle_check.setToolTip("Запускает тихий CPU-relief, когда общий CPU держится выше порога и пользователь не активен.")
         self.cpu_affinity_check = _toggle("Разрешить временное ограничение ядер")
         self.cpu_affinity_check.setChecked(self.config.cpu_throttle_affinity_enabled)
-        self.cpu_limiter_check = _toggle("Коротко притормаживать процесс, если priority не помогает")
+        self.cpu_limiter_check = _toggle("Короткий CPU limiter fallback")
         self.cpu_limiter_check.setChecked(self.config.cpu_limiter_enabled)
-        self.scheduled_cleanup_check = _toggle("Автоочистка temp/cache по расписанию")
+        self.scheduled_cleanup_check = _toggle("Автоочистка temp/cache")
         self.scheduled_cleanup_check.setChecked(self.config.scheduled_cleanup_enabled)
         self.scheduled_cleanup_interval_edit = QLineEdit(str(self.config.scheduled_cleanup_interval_minutes))
         self.scheduled_cleanup_check.setToolTip("Очищает только заранее известные безопасные temp/cache/log roots.")
@@ -1435,12 +1443,12 @@ class PCOptimizerQtWindow(QMainWindow):
         self.cleanup_browser_cache_check.setChecked(self.config.cleanup_browser_cache_enabled)
         self.cleanup_prefetch_check = _toggle("Prefetch старше 7 дней")
         self.cleanup_prefetch_check.setChecked(self.config.cleanup_prefetch_enabled)
-        self.cleanup_logs_check = _toggle("Логи Windows/WER старше N дней")
+        self.cleanup_logs_check = _toggle("Старые логи Windows/WER")
         self.cleanup_logs_check.setChecked(self.config.cleanup_logs_enabled)
         self.cleanup_logs_days_edit = QLineEdit(str(self.config.cleanup_logs_older_than_days))
-        self.cleanup_recycle_bin_check = _toggle("Корзина Windows (только при явном включении)")
+        self.cleanup_recycle_bin_check = _toggle("Корзина Windows")
         self.cleanup_recycle_bin_check.setChecked(self.config.cleanup_recycle_bin_enabled)
-        self.periodic_optimization_check = _toggle("Тихая автооптимизация по интервалу")
+        self.periodic_optimization_check = _toggle("Тихая автооптимизация")
         self.periodic_optimization_check.setChecked(self.config.periodic_optimization_enabled)
         self.periodic_interval_edit = QLineEdit(str(self.config.periodic_optimization_interval_minutes))
         self.periodic_optimization_check.setToolTip("Запускает one-click цикл в фоне только при простое и с учётом кулдаунов.")
@@ -1624,6 +1632,48 @@ class PCOptimizerQtWindow(QMainWindow):
         self.save_settings_button.clicked.connect(self.save_settings)
         footer_layout.addWidget(self.save_settings_button)
         layout.addWidget(footer)
+        self._constrain_settings_controls()
+
+    def _constrain_settings_controls(self) -> None:
+        value_widgets = (
+            self.theme_combo,
+            self.automation_mode_combo,
+            self.interval_edit,
+            self.process_interval_edit,
+            self.cpu_threshold_edit,
+            self.cpu_sustain_edit,
+            self.ram_threshold_edit,
+            self.cooldown_edit,
+            self.max_priority_edit,
+            self.auto_close_combo,
+            self.close_background_edit,
+            self.close_cpu_edit,
+            self.close_ram_edit,
+            self.close_duplicates_edit,
+            self.sleep_after_edit,
+            self.sleep_check_edit,
+            self.ram_auto_threshold_edit,
+            self.cpu_optimizer_priority_combo,
+            self.cpu_optimizer_min_cpu_edit,
+            self.cpu_optimizer_max_edit,
+            self.cpu_optimizer_affinity_ratio_edit,
+            self.cpu_optimizer_min_cores_edit,
+            self.cpu_optimizer_restore_edit,
+            self.scheduled_cleanup_interval_edit,
+            self.auto_cleanup_cooldown_edit,
+            self.cleanup_logs_days_edit,
+            self.periodic_interval_edit,
+        )
+        for widget in value_widgets:
+            widget.setMaximumWidth(SETTINGS_LAYOUT.field_max_width)
+            widget.setMinimumWidth(180)
+            widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        for button in (self.reset_optimal_button, self.check_updates_button):
+            button.setMaximumWidth(SETTINGS_LAYOUT.field_max_width)
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        for button in (self.import_settings_button, self.export_settings_button, self.save_settings_button):
+            button.setMinimumWidth(0)
+            button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(self._current_icon(), self)
@@ -1853,6 +1903,8 @@ class PCOptimizerQtWindow(QMainWindow):
             self.sidebar_optimize_button.setIcon(_feather_icon("zap", self.palette["bg"]))
         if hasattr(self, "health_admin_label"):
             self.health_admin_label.setText("Admin: да" if is_admin() else "Admin: нет")
+        if hasattr(self, "topbar_menu_button"):
+            self.topbar_menu_button.setIcon(_feather_icon("settings", self.palette["accent"]))
         for card in (self.cpu_card, self.ram_card, self.disk_card, self.swap_card):
             card.set_palette(self.palette)
         self.graph.set_palette(self.palette)
@@ -3642,7 +3694,8 @@ def _settings_section(title: str, palette: dict[str, str]) -> tuple[QFrame, QFor
     form.setSpacing(10)
     form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
-    form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+    form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+    form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
     layout.addLayout(form)
     return frame, form
 
@@ -3651,6 +3704,8 @@ def _form_row(form: QFormLayout, label: str, widget: QWidget) -> None:
     if label:
         label_widget = QLabel(label)
         label_widget.setObjectName("FormLabel")
+        label_widget.setWordWrap(True)
+        label_widget.setMaximumWidth(260)
         form.addRow(label_widget, widget)
     else:
         form.addRow(widget)
@@ -3781,6 +3836,33 @@ def _qss(palette: dict[str, str]) -> str:
     QStackedWidget#PageStack {{
         background: {palette["bg"]};
         border: none;
+    }}
+    QToolButton#TopbarMenuButton {{
+        min-width: 118px;
+        padding: 8px 12px;
+        border-radius: 8px;
+        font-weight: 650;
+    }}
+    QToolButton#TopbarMenuButton::menu-indicator {{
+        image: none;
+        width: 0px;
+    }}
+    QMenu {{
+        background: {palette["panel"]};
+        color: {palette["text"]};
+        border: 1px solid {palette["border"]};
+        border-radius: 8px;
+        padding: 6px;
+    }}
+    QMenu::item {{
+        padding: 8px 18px 8px 26px;
+        border-radius: 6px;
+    }}
+    QMenu::item:selected {{
+        background: {palette["panel_hover"]};
+    }}
+    QWidget#SettingsContent {{
+        min-width: 0px;
     }}
     QTabWidget::pane {{
         border: 1px solid {palette["border"]};

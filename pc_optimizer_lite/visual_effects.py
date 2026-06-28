@@ -10,6 +10,9 @@ from dataclasses import dataclass
 LOGGER = logging.getLogger(__name__)
 
 SPIF_NONE = 0
+SPIF_UPDATEINIFILE = 0x01
+SPIF_SENDCHANGE = 0x02
+SPIF_APPLY = SPIF_UPDATEINIFILE | SPIF_SENDCHANGE
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,12 +25,19 @@ class VisualEffectSetting:
 
 
 VISUAL_EFFECT_SETTINGS = (
+    VisualEffectSetting("ui_effects", 0x103E, 0x103F),
     VisualEffectSetting("client_area_animation", 0x1042, 0x1043),
     VisualEffectSetting("menu_animation", 0x1002, 0x1003),
+    VisualEffectSetting("menu_fade", 0x1012, 0x1013),
     VisualEffectSetting("combo_box_animation", 0x1004, 0x1005),
     VisualEffectSetting("listbox_smooth_scrolling", 0x1006, 0x1007),
+    VisualEffectSetting("gradient_captions", 0x1008, 0x1009),
+    VisualEffectSetting("hot_tracking", 0x100E, 0x100F),
     VisualEffectSetting("selection_fade", 0x1014, 0x1015),
     VisualEffectSetting("tooltip_animation", 0x1016, 0x1017),
+    VisualEffectSetting("tooltip_fade", 0x1018, 0x1019),
+    VisualEffectSetting("cursor_shadow", 0x101A, 0x101B),
+    VisualEffectSetting("drop_shadow", 0x1024, 0x1025),
 )
 
 
@@ -57,7 +67,7 @@ class WindowsVisualEffectsAdapter:
             setting.set_action,
             0,
             ctypes.c_void_p(1 if enabled else 0),
-            SPIF_NONE,
+            SPIF_APPLY,
         )
         return bool(ok)
 
