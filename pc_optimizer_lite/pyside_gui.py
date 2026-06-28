@@ -35,10 +35,10 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QScrollArea,
     QSizePolicy,
+    QStackedWidget,
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
-    QTabWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -74,6 +74,7 @@ from .ram_cleaner import MEMORY_PURGE_STANDBY_LIST, RamCleanMode, RamCleaner, Ra
 from .runtime_policy import sleep_wake_poll_policy
 from .sleep_manager import SleepAction, SleepManager
 from .smart_process_manager import CloseCandidate, SmartProcessManager
+from .ui_model import DEFAULT_NAV_PAGES, build_design_palette, evaluate_system_health
 from .updater import UpdateCheckResult, UpdateError, check_for_updates, download_and_install_update, is_repository_configured
 from .version import APP_VERSION
 from .visual_effects import VisualEffectsManager
@@ -86,36 +87,8 @@ STARTUP_UPDATE_CHECK_DELAY_MS = 8000
 
 
 THEMES = {
-    "dark": {
-        "bg": "#101318",
-        "panel": "#171b22",
-        "panel_2": "#1f2630",
-        "text": "#eef2f7",
-        "muted": "#9aa6b2",
-        "border": "#2b3440",
-        "accent": "#60a5fa",
-        "good": "#34d399",
-        "warn": "#fbbf24",
-        "bad": "#fb7185",
-        "input": "#0f141b",
-        "row": "#131821",
-        "row_alt": "#18202b",
-    },
-    "light": {
-        "bg": "#f5f7fb",
-        "panel": "#ffffff",
-        "panel_2": "#eef2f7",
-        "text": "#111827",
-        "muted": "#667085",
-        "border": "#d7dde6",
-        "accent": "#2563eb",
-        "good": "#059669",
-        "warn": "#d97706",
-        "bad": "#e11d48",
-        "input": "#ffffff",
-        "row": "#ffffff",
-        "row_alt": "#f1f5f9",
-    },
+    "dark": build_design_palette("dark"),
+    "light": build_design_palette("light"),
 }
 
 
@@ -800,9 +773,16 @@ class PCOptimizerQtWindow(QMainWindow):
         save_config(self.config)
 
     def _build_ui(self) -> None:
-        self.tabs = QTabWidget(self)
-        self.tabs.currentChanged.connect(lambda *_: self._sync_process_collection_mode())
-        self.setCentralWidget(self.tabs)
+        self.nav_pages = DEFAULT_NAV_PAGES
+        self.nav_buttons: dict[str, QPushButton] = {}
+        self._page_index_by_id: dict[str, int] = {}
+
+        shell = QWidget(self)
+        shell.setObjectName("AppShell")
+        shell_layout = QHBoxLayout(shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+        self.setCentralWidget(shell)
 
         self.monitoring_tab = QWidget()
         self.processes_tab = QWidget()
@@ -810,17 +790,169 @@ class PCOptimizerQtWindow(QMainWindow):
         self.whitelist_tab = QWidget()
         self.settings_tab = QWidget()
 
-        self.tabs.addTab(self.monitoring_tab, _feather_icon("activity", self.palette["accent"]), "Мониторинг")
-        self.tabs.addTab(self.processes_tab, _feather_icon("list", self.palette["accent"]), "Процессы")
-        self.tabs.addTab(self.activity_tab, _feather_icon("clock", self.palette["accent"]), "Активность")
-        self.tabs.addTab(self.whitelist_tab, _feather_icon("shield", self.palette["accent"]), "Исключения")
-        self.tabs.addTab(self.settings_tab, _feather_icon("settings", self.palette["accent"]), "Настройки")
+        shell_layout.addWidget(self._build_sidebar(), 0)
+
+        main_area = QWidget()
+        main_area.setObjectName("MainArea")
+        main_layout = QVBoxLayout(main_area)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        shell_layout.addWidget(main_area, 1)
+
+        main_layout.addWidget(self._build_topbar(), 0)
+
+        self.tabs = QStackedWidget(self)
+        self.tabs.setObjectName("PageStack")
+        self.tabs.currentChanged.connect(self._on_shell_page_changed)
+        main_layout.addWidget(self.tabs, 1)
+
+        self._add_shell_page("overview", self.monitoring_tab)
+        self._add_shell_page("processes", self.processes_tab)
+        self._add_shell_page("activity", self.activity_tab)
+        self._add_shell_page("exceptions", self.whitelist_tab)
+        self._add_shell_page("settings", self.settings_tab)
 
         self._build_monitoring_tab()
         self._build_processes_tab()
         self._build_activity_tab()
         self._build_whitelist_tab()
         self._build_settings_tab()
+        self._on_shell_page_changed(0)
+
+    def _build_sidebar(self) -> QFrame:
+        sidebar = QFrame()
+        sidebar.setObjectName("Sidebar")
+        sidebar.setFixedWidth(232)
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(14, 16, 14, 16)
+        layout.setSpacing(10)
+
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(10)
+        icon_label = QLabel()
+        icon_label.setObjectName("BrandIcon")
+        icon_label.setPixmap(_app_icon(self.palette).pixmap(28, 28))
+        brand_text = QVBoxLayout()
+        brand_text.setSpacing(1)
+        title = QLabel("PC Optimizer Lite")
+        title.setObjectName("BrandTitle")
+        subtitle = QLabel(f"Версия {APP_VERSION}")
+        subtitle.setObjectName("BrandSubtitle")
+        brand_text.addWidget(title)
+        brand_text.addWidget(subtitle)
+        brand_row.addWidget(icon_label)
+        brand_row.addLayout(brand_text)
+        brand_row.addStretch(1)
+        layout.addLayout(brand_row)
+        layout.addSpacing(10)
+
+        for page in self.nav_pages:
+            button = QPushButton()
+            button.setObjectName("NavButton")
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setIcon(_feather_icon(page.icon, self.palette["muted"]))
+            button.setIconSize(QSize(18, 18))
+            button.setText(f"{page.title}\n{page.subtitle}")
+            button.setToolTip(page.topbar_description)
+            button.clicked.connect(lambda checked=False, page_id=page.page_id: self._switch_page(page_id))
+            self.nav_buttons[page.page_id] = button
+            layout.addWidget(button)
+
+        layout.addStretch(1)
+
+        optimize_card = QFrame()
+        optimize_card.setObjectName("SidebarStatusCard")
+        optimize_layout = QVBoxLayout(optimize_card)
+        optimize_layout.setContentsMargins(12, 12, 12, 12)
+        optimize_layout.setSpacing(8)
+        label = QLabel("Оптимизация")
+        label.setObjectName("SidebarCardTitle")
+        hint = QLabel("Проверка системы, освобождение ресурсов и понятный отчёт.")
+        hint.setWordWrap(True)
+        hint.setObjectName("BrandSubtitle")
+        self.sidebar_optimize_button = QPushButton("Оптимизировать")
+        self.sidebar_optimize_button.setObjectName("SidebarPrimaryButton")
+        self.sidebar_optimize_button.setIcon(_feather_icon("zap", self.palette["bg"]))
+        self.sidebar_optimize_button.clicked.connect(self.start_selected_optimization)
+        optimize_layout.addWidget(label)
+        optimize_layout.addWidget(hint)
+        optimize_layout.addWidget(self.sidebar_optimize_button)
+        layout.addWidget(optimize_card)
+
+        self.sidebar_status_label = QLabel(self._sidebar_status_text())
+        self.sidebar_status_label.setObjectName("SidebarFooter")
+        self.sidebar_status_label.setWordWrap(True)
+        layout.addWidget(self.sidebar_status_label)
+        return sidebar
+
+    def _build_topbar(self) -> QFrame:
+        topbar = QFrame()
+        topbar.setObjectName("Topbar")
+        layout = QHBoxLayout(topbar)
+        layout.setContentsMargins(22, 14, 18, 14)
+        layout.setSpacing(12)
+
+        title_block = QVBoxLayout()
+        title_block.setSpacing(2)
+        self.topbar_title_label = QLabel()
+        self.topbar_title_label.setObjectName("TopbarTitle")
+        self.topbar_description_label = QLabel()
+        self.topbar_description_label.setObjectName("TopbarDescription")
+        self.topbar_description_label.setWordWrap(True)
+        title_block.addWidget(self.topbar_title_label)
+        title_block.addWidget(self.topbar_description_label)
+        layout.addLayout(title_block, 1)
+
+        self.topbar_status_label = QLabel("● Мониторинг активен")
+        self.topbar_status_label.setObjectName("MonitoringIndicator")
+        self.topbar_status_label.setToolTip("Сбор процессов включается только на странице процессов или при явной необходимости.")
+        layout.addWidget(self.topbar_status_label)
+        layout.addWidget(_button("В трей", "minimize", self.hide_to_tray, self.palette))
+
+        menu_button = QToolButton()
+        menu_button.setObjectName("TopbarMenuButton")
+        menu_button.setText("...")
+        menu_button.setToolTip("Дополнительные действия")
+        menu = QMenu(menu_button)
+        refresh_action = QAction(_feather_icon("refresh", self.palette["accent"]), "Проверить обновления", menu_button)
+        refresh_action.triggered.connect(self.check_updates_now)
+        settings_action = QAction(_feather_icon("settings", self.palette["accent"]), "Открыть настройки", menu_button)
+        settings_action.triggered.connect(lambda: self._switch_page("settings"))
+        menu.addAction(refresh_action)
+        menu.addAction(settings_action)
+        menu_button.setMenu(menu)
+        menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        layout.addWidget(menu_button)
+        return topbar
+
+    def _add_shell_page(self, page_id: str, widget: QWidget) -> None:
+        index = self.tabs.addWidget(widget)
+        self._page_index_by_id[page_id] = index
+
+    def _switch_page(self, page_id: str) -> None:
+        index = self._page_index_by_id.get(page_id)
+        if index is not None:
+            self.tabs.setCurrentIndex(index)
+
+    def _on_shell_page_changed(self, index: int) -> None:
+        current_page = self.nav_pages[index] if 0 <= index < len(self.nav_pages) else self.nav_pages[0]
+        self.topbar_title_label.setText(current_page.topbar_title)
+        self.topbar_description_label.setText(current_page.topbar_description)
+        for page in self.nav_pages:
+            button = self.nav_buttons.get(page.page_id)
+            if button is None:
+                continue
+            active = page.page_id == current_page.page_id
+            button.setChecked(active)
+            button.setProperty("active", active)
+            button.setIcon(_feather_icon(page.icon, self.palette["accent"] if active else self.palette["muted"]))
+            button.style().unpolish(button)
+            button.style().polish(button)
+        self._sync_process_collection_mode()
+
+    def _sidebar_status_text(self) -> str:
+        return f"{self._mode_label()} · v{APP_VERSION}"
 
     def _build_monitoring_tab(self) -> None:
         root_layout = QVBoxLayout(self.monitoring_tab)
@@ -857,20 +989,51 @@ class PCOptimizerQtWindow(QMainWindow):
         layout.addWidget(self.update_banner)
 
         optimize_panel = QFrame()
-        optimize_panel.setObjectName("OptimizeHero")
+        optimize_panel.setObjectName("HealthStatusCard")
         _add_shadow(optimize_panel, self.palette)
         optimize_layout = QVBoxLayout(optimize_panel)
         optimize_layout.setContentsMargins(18, 16, 18, 16)
-        optimize_layout.setSpacing(8)
-        title = QLabel("Оптимизация одним нажатием")
-        title.setObjectName("HeroTitle")
-        subtitle = QLabel("Плавный пошаговый цикл: проверка системы, освобождение ресурсов и понятный отчёт.")
-        subtitle.setObjectName("HeroSubtitle")
+        optimize_layout.setSpacing(12)
+        header = QHBoxLayout()
+        header.setSpacing(14)
+        self.health_status_dot = QLabel("●")
+        self.health_status_dot.setObjectName("HealthDot")
+        self.health_title_label = QLabel("Система в порядке")
+        self.health_title_label.setObjectName("HeroTitle")
+        self.health_detail_label = QLabel("Первый снимок системы появится через несколько секунд.")
+        self.health_detail_label.setObjectName("HeroSubtitle")
+        self.health_detail_label.setWordWrap(True)
+        title_block = QVBoxLayout()
+        title_block.setSpacing(3)
+        title_block.addWidget(self.health_title_label)
+        title_block.addWidget(self.health_detail_label)
+        header.addWidget(self.health_status_dot)
+        header.addLayout(title_block, 1)
+
+        self._selected_optimization_mode = "light" if self.config.lite_mode_enabled else "deep"
+        mode_segment = QFrame()
+        mode_segment.setObjectName("SegmentedControl")
+        segment_layout = QHBoxLayout(mode_segment)
+        segment_layout.setContentsMargins(3, 3, 3, 3)
+        segment_layout.setSpacing(3)
+        self.optimize_light_button = QPushButton("Лёгкая")
+        self.optimize_deep_button = QPushButton("Глубокая")
+        for mode, button, tooltip in (
+            ("light", self.optimize_light_button, "Облегчённый цикл: меньше шагов и пауз, ниже нагрузка на слабом ПК."),
+            ("deep", self.optimize_deep_button, "Полный цикл: все включённые шаги оптимизации."),
+        ):
+            button.setObjectName("SegmentButton")
+            button.setCheckable(True)
+            button.setToolTip(tooltip)
+            button.clicked.connect(lambda checked=False, selected_mode=mode: self._set_optimization_mode(selected_mode))
+            segment_layout.addWidget(button)
+        header.addWidget(mode_segment)
+
         self.optimize_button = QPushButton("Оптимизировать")
         self.optimize_button.setObjectName("OptimizeButton")
         self.optimize_button.setIcon(_feather_icon("zap", self.palette["bg"]))
-        self.optimize_button.setIconSize(QSize(22, 22))
-        self.optimize_button.clicked.connect(self.start_full_optimization)
+        self.optimize_button.setIconSize(QSize(20, 20))
+        self.optimize_button.clicked.connect(self.start_selected_optimization)
         self.optimize_progress = QProgressBar()
         self.optimize_progress.setRange(0, 100)
         self.optimize_progress.setValue(0)
@@ -879,20 +1042,24 @@ class PCOptimizerQtWindow(QMainWindow):
         self.optimize_status.setObjectName("StatusText")
         self.optimize_cancel_button = _button("Прервать", "x", self.cancel_full_optimization, self.palette)
         self.optimize_cancel_button.setVisible(False)
-        center = QHBoxLayout()
-        center.addStretch(1)
-        center.addWidget(self.optimize_button)
-        center.addStretch(1)
+        action_row = QHBoxLayout()
+        action_row.setSpacing(10)
+        action_row.addWidget(self.optimize_button)
+        action_row.addStretch(1)
+        self.health_admin_label = QLabel("Admin: да" if is_admin() else "Admin: нет")
+        self.health_admin_label.setObjectName("HealthAdmin")
+        self.health_admin_label.setToolTip("Некоторые глубокие операции требуют запуска от имени администратора.")
+        action_row.addWidget(self.health_admin_label)
         cancel_row = QHBoxLayout()
         cancel_row.addWidget(self.optimize_status)
         cancel_row.addStretch(1)
         cancel_row.addWidget(self.optimize_cancel_button)
-        optimize_layout.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
-        optimize_layout.addWidget(subtitle, alignment=Qt.AlignmentFlag.AlignCenter)
-        optimize_layout.addLayout(center)
+        optimize_layout.addLayout(header)
+        optimize_layout.addLayout(action_row)
         optimize_layout.addWidget(self.optimize_progress)
         optimize_layout.addLayout(cancel_row)
         layout.addWidget(optimize_panel)
+        self._set_optimization_mode(self._selected_optimization_mode)
 
         self.card_grid = QGridLayout()
         self.card_grid.setContentsMargins(0, 0, 0, 0)
@@ -909,6 +1076,24 @@ class PCOptimizerQtWindow(QMainWindow):
         self.metric_cards = (self.cpu_card, self.ram_card, self.disk_card, self.swap_card)
         layout.addLayout(self.card_grid)
         self._arrange_metric_cards()
+
+        quick_panel = QFrame()
+        quick_panel.setObjectName("InlinePanel")
+        quick_layout = QVBoxLayout(quick_panel)
+        quick_layout.setContentsMargins(14, 12, 14, 14)
+        quick_layout.setSpacing(10)
+        quick_title = QLabel("Быстрые действия")
+        quick_title.setObjectName("SectionTitle")
+        quick_buttons = QHBoxLayout()
+        quick_buttons.setSpacing(10)
+        quick_buttons.addWidget(self._build_ram_clean_button())
+        quick_buttons.addWidget(_button("Очистить temp/cache", "trash", self.confirm_temp_cleanup, self.palette))
+        quick_buttons.addWidget(_button("Свернуть в трей", "minimize", self.hide_to_tray, self.palette))
+        quick_buttons.addWidget(_button("Исключения", "shield", lambda: self._switch_page("exceptions"), self.palette))
+        quick_buttons.addStretch(1)
+        quick_layout.addWidget(quick_title)
+        quick_layout.addLayout(quick_buttons)
+        layout.addWidget(quick_panel)
 
         self.pagefile_panel = QFrame()
         self.pagefile_panel.setObjectName("InlinePanel")
@@ -959,22 +1144,6 @@ class PCOptimizerQtWindow(QMainWindow):
         _configure_table(self.disk_table, min_rows=3, max_height=190)
         layout.addWidget(self.disk_table, 1)
 
-        bottom_bar = QFrame()
-        bottom_bar.setObjectName("MonitorBottomBar")
-        bottom_bar.setFixedHeight(62)
-        bottom_layout = QHBoxLayout(bottom_bar)
-        bottom_layout.setContentsMargins(18, 10, 18, 10)
-        bottom_layout.setSpacing(10)
-        ram_label = QLabel("RAM")
-        ram_label.setObjectName("BottomBarLabel")
-        ram_label.setToolTip("Меню выбирает лёгкую или глубокую очистку RAM")
-        bottom_layout.addWidget(ram_label)
-        bottom_layout.addWidget(self._build_ram_clean_button())
-        bottom_layout.addWidget(_button("Очистить temp/cache", "trash", self.confirm_temp_cleanup, self.palette))
-        bottom_layout.addWidget(_button("Свернуть в трей", "minimize", self.hide_to_tray, self.palette))
-        bottom_layout.addStretch(1)
-        root_layout.addWidget(bottom_bar, 0)
-
     def _build_ram_clean_button(self) -> QToolButton:
         button = QToolButton()
         button.setObjectName("RamCleanButton")
@@ -999,7 +1168,30 @@ class PCOptimizerQtWindow(QMainWindow):
     def _build_processes_tab(self) -> None:
         layout = QVBoxLayout(self.processes_tab)
         layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
         toolbar = QHBoxLayout()
+        toolbar.setSpacing(10)
+        self.process_search_edit = QLineEdit()
+        self.process_search_edit.setObjectName("SearchInput")
+        self.process_search_edit.setPlaceholderText("Поиск процесса, PID или пути")
+        self.process_search_edit.textChanged.connect(lambda *_: self._refresh_process_filter())
+        toolbar.addWidget(self.process_search_edit, 2)
+
+        self.process_filter_combo = QComboBox()
+        self.process_filter_combo.addItem("Все процессы", "all")
+        self.process_filter_combo.addItem("С нагрузкой", "load")
+        self.process_filter_combo.addItem("Фоновые", "background")
+        self.process_filter_combo.addItem("В исключениях", "excluded")
+        self.process_filter_combo.currentIndexChanged.connect(lambda *_: self._refresh_process_filter())
+        toolbar.addWidget(self.process_filter_combo)
+
+        self.process_sort_combo = QComboBox()
+        self.process_sort_combo.addItem("Сортировка: CPU", "cpu")
+        self.process_sort_combo.addItem("Сортировка: RAM", "ram")
+        self.process_sort_combo.addItem("Сортировка: имя", "name")
+        self.process_sort_combo.currentIndexChanged.connect(lambda *_: self._refresh_process_filter())
+        toolbar.addWidget(self.process_sort_combo)
+
         for text, icon, callback in (
             ("Обновить", "refresh", self.refresh_process_table),
             ("Снизить влияние", "arrow-down", self.lower_selected_priority),
@@ -1010,34 +1202,61 @@ class PCOptimizerQtWindow(QMainWindow):
         toolbar.addStretch(1)
         layout.addLayout(toolbar)
 
-        self.process_table = QTableWidget(0, 7)
-        self.process_table.setHorizontalHeaderLabels(["PID", "Процесс", "CPU %", "RAM %", "RAM", "Приоритет", "Путь"])
+        self.process_table = QTableWidget(0, 6)
+        self.process_table.setHorizontalHeaderLabels(["Процесс", "CPU %", "RAM", "Приоритет", "Статус", "Путь"])
         _configure_table(self.process_table, min_rows=8)
         self.process_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         layout.addWidget(self.process_table, 1)
-        layout.addWidget(QLabel("Серым отмечены системные или пользовательские исключения: они не трогаются никакими функциями."))
+        hint = QLabel(
+            "Серым отмечены системные или пользовательские исключения. Per-process disk I/O не собирается, чтобы сама программа не грузила CPU."
+        )
+        hint.setObjectName("SettingsHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
 
     def _build_activity_tab(self) -> None:
         layout = QVBoxLayout(self.activity_tab)
         layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
 
         self.activity_table = QTableWidget(0, 3)
         self.activity_table.setHorizontalHeaderLabels(["Время", "Событие", "Детали"])
         _configure_table(self.activity_table, min_rows=5)
-        layout.addWidget(QLabel("Лента событий"))
-        layout.addWidget(self.activity_table, 1)
+        events_panel = QFrame()
+        events_panel.setObjectName("InlinePanel")
+        events_layout = QVBoxLayout(events_panel)
+        events_layout.setContentsMargins(14, 12, 14, 14)
+        events_title = QLabel("Лента событий")
+        events_title.setObjectName("SectionTitle")
+        events_layout.addWidget(events_title)
+        events_layout.addWidget(self.activity_table, 1)
+        layout.addWidget(events_panel, 2)
 
         self.sleep_table = QTableWidget(0, 6)
         self.sleep_table.setHorizontalHeaderLabels(["PID", "Процесс", "Уснул", "Причина", "Состояние", "Действие"])
         _configure_table(self.sleep_table, min_rows=3, max_height=170)
-        layout.addWidget(QLabel("Спящие приложения"))
-        layout.addWidget(self.sleep_table)
+        sleep_panel = QFrame()
+        sleep_panel.setObjectName("InlinePanel")
+        sleep_layout = QVBoxLayout(sleep_panel)
+        sleep_layout.setContentsMargins(14, 12, 14, 14)
+        sleep_title = QLabel("Спящие приложения")
+        sleep_title.setObjectName("SectionTitle")
+        sleep_layout.addWidget(sleep_title)
+        sleep_layout.addWidget(self.sleep_table)
+        layout.addWidget(sleep_panel)
 
         self.closed_table = QTableWidget(0, 6)
         self.closed_table.setHorizontalHeaderLabels(["Время", "Процесс", "Причина", "Режим", "Путь", "Действие"])
         _configure_table(self.closed_table, min_rows=4)
-        layout.addWidget(QLabel("История закрытых процессов"))
-        layout.addWidget(self.closed_table)
+        closed_panel = QFrame()
+        closed_panel.setObjectName("InlinePanel")
+        closed_layout = QVBoxLayout(closed_panel)
+        closed_layout.setContentsMargins(14, 12, 14, 14)
+        closed_title = QLabel("История закрытых процессов")
+        closed_title.setObjectName("SectionTitle")
+        closed_layout.addWidget(closed_title)
+        closed_layout.addWidget(self.closed_table)
+        layout.addWidget(closed_panel)
         self.refresh_activity()
 
     def _build_whitelist_tab(self) -> None:
@@ -1073,9 +1292,22 @@ class PCOptimizerQtWindow(QMainWindow):
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(12)
 
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(12)
+
+        settings_nav = QFrame()
+        settings_nav.setObjectName("SettingsNav")
+        settings_nav.setFixedWidth(180)
+        self.settings_nav_layout = QVBoxLayout(settings_nav)
+        self.settings_nav_layout.setContentsMargins(10, 10, 10, 10)
+        self.settings_nav_layout.setSpacing(6)
+        body.addWidget(settings_nav)
+
         scroll = QScrollArea()
         scroll.setObjectName("SettingsScroll")
         scroll.setWidgetResizable(True)
+        self.settings_scroll = scroll
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(2, 2, 10, 2)
@@ -1347,9 +1579,28 @@ class PCOptimizerQtWindow(QMainWindow):
         _form_row(updates_form, "", self.check_updates_button)
         content_layout.addWidget(updates_section)
 
+        for label, section in (
+            ("Основные", monitoring_section),
+            ("Уведомления", notifications_section),
+            ("Закрытие", close_section),
+            ("Сон", sleep_section),
+            ("RAM", ram_section),
+            ("CPU", cpu_section),
+            ("Очистка", cleanup_section),
+            ("Автопилот", periodic_section),
+            ("Шаги", steps_section),
+            ("Обновления", updates_section),
+        ):
+            nav_button = QPushButton(label)
+            nav_button.setObjectName("SettingsNavButton")
+            nav_button.clicked.connect(lambda checked=False, target=section: self.settings_scroll.ensureWidgetVisible(target, 0, 8))
+            self.settings_nav_layout.addWidget(nav_button)
+        self.settings_nav_layout.addStretch(1)
+
         content_layout.addStretch(1)
         scroll.setWidget(content)
-        layout.addWidget(scroll, 1)
+        body.addWidget(scroll, 1)
+        layout.addLayout(body, 1)
 
         footer = QFrame()
         footer.setObjectName("SettingsFooter")
@@ -1408,6 +1659,8 @@ class PCOptimizerQtWindow(QMainWindow):
         if hasattr(self, "tray"):
             self.tray.setIcon(icon)
             self.tray.setToolTip(f"PC Optimizer Lite — {self._mode_label()}")
+        if hasattr(self, "sidebar_status_label"):
+            self.sidebar_status_label.setText(self._sidebar_status_text())
 
     def _preview_automation_mode(self) -> None:
         if self._syncing_controls:
@@ -1594,6 +1847,12 @@ class PCOptimizerQtWindow(QMainWindow):
         self.palette = THEMES[self.config.theme]
         QApplication.instance().setStyleSheet(_qss(self.palette))
         self._refresh_tray_state()
+        if hasattr(self, "tabs"):
+            self._on_shell_page_changed(self.tabs.currentIndex())
+        if hasattr(self, "sidebar_optimize_button"):
+            self.sidebar_optimize_button.setIcon(_feather_icon("zap", self.palette["bg"]))
+        if hasattr(self, "health_admin_label"):
+            self.health_admin_label.setText("Admin: да" if is_admin() else "Admin: нет")
         for card in (self.cpu_card, self.ram_card, self.disk_card, self.swap_card):
             card.set_palette(self.palette)
         self.graph.set_palette(self.palette)
@@ -1646,6 +1905,7 @@ class PCOptimizerQtWindow(QMainWindow):
                 f"R {format_bytes(snapshot.disk_io.read_bytes_per_second)}/s · W {format_bytes(snapshot.disk_io.write_bytes_per_second)}/s",
                 max_disk,
             )
+            self._update_health_status(snapshot, max_disk)
             if not self.config.core_table_collapsed:
                 self._render_cores(snapshot.per_core_cpu_percent)
             self._render_disks(snapshot)
@@ -1668,6 +1928,25 @@ class PCOptimizerQtWindow(QMainWindow):
             self._maybe_smart_close(snapshot)
             self._maybe_scheduled_auto_cleanup(snapshot)
             self._maybe_periodic_optimization(snapshot)
+
+    def _update_health_status(self, snapshot: MonitorSnapshot, max_disk: float) -> None:
+        status = evaluate_system_health(
+            cpu_percent=snapshot.cpu_percent,
+            ram_percent=snapshot.memory.percent,
+            disk_percent=max_disk,
+            swap_percent=snapshot.swap.percent,
+        )
+        color = {
+            "good": self.palette["good"],
+            "warn": self.palette["warn"],
+            "bad": self.palette["bad"],
+        }.get(status.severity, self.palette["info"])
+        self.health_title_label.setText(status.title)
+        self.health_detail_label.setText(status.detail)
+        self.health_status_dot.setStyleSheet(f"color: {color}; font-size: 22px;")
+        if hasattr(self, "topbar_status_label"):
+            self.topbar_status_label.setText(f"● Мониторинг · {_format_time(time.time())}")
+            self.topbar_status_label.setStyleSheet(f"color: {color};")
 
     def _update_pagefile_advice(self, snapshot: MonitorSnapshot) -> None:
         if self._pagefile_auto_managed is None:
@@ -1755,6 +2034,28 @@ class PCOptimizerQtWindow(QMainWindow):
         )
         self.refresh_activity()
 
+    def _set_optimization_mode(self, mode: str) -> None:
+        self._selected_optimization_mode = "light" if mode == "light" else "deep"
+        for button_mode, button in (
+            ("light", getattr(self, "optimize_light_button", None)),
+            ("deep", getattr(self, "optimize_deep_button", None)),
+        ):
+            if button is None:
+                continue
+            active = button_mode == self._selected_optimization_mode
+            button.setChecked(active)
+            button.setProperty("active", active)
+            button.style().unpolish(button)
+            button.style().polish(button)
+        if hasattr(self, "optimize_status"):
+            label = "облегчённый цикл" if self._selected_optimization_mode == "light" else "полный цикл"
+            self.optimize_status.setText(f"● Готово к запуску: {label}")
+
+    def start_selected_optimization(self) -> None:
+        """Start optimization with the mode selected in the overview card."""
+
+        self._start_optimization(eco_mode=self._selected_optimization_mode == "light", quiet=False)
+
     def start_full_optimization(self) -> None:
         """Start one-click optimization in a Qt worker thread."""
 
@@ -1773,6 +2074,12 @@ class PCOptimizerQtWindow(QMainWindow):
         if not quiet:
             self.optimize_button.setEnabled(False)
             self.optimize_button.setText("Идёт оптимизация...")
+            if hasattr(self, "sidebar_optimize_button"):
+                self.sidebar_optimize_button.setEnabled(False)
+            if hasattr(self, "optimize_light_button"):
+                self.optimize_light_button.setEnabled(False)
+            if hasattr(self, "optimize_deep_button"):
+                self.optimize_deep_button.setEnabled(False)
             self.optimize_progress.setVisible(True)
             self.optimize_progress.setValue(0)
             self.optimize_cancel_button.setEnabled(True)
@@ -1842,6 +2149,12 @@ class PCOptimizerQtWindow(QMainWindow):
             return
         self.optimize_button.setEnabled(True)
         self.optimize_button.setText("Оптимизировать")
+        if hasattr(self, "sidebar_optimize_button"):
+            self.sidebar_optimize_button.setEnabled(True)
+        if hasattr(self, "optimize_light_button"):
+            self.optimize_light_button.setEnabled(True)
+        if hasattr(self, "optimize_deep_button"):
+            self.optimize_deep_button.setEnabled(True)
         self.optimize_cancel_button.setEnabled(True)
         self.optimize_cancel_button.setVisible(False)
         self.optimize_progress.setValue(100 if not result.cancelled else self.optimize_progress.value())
@@ -1978,27 +2291,62 @@ class PCOptimizerQtWindow(QMainWindow):
         self._process_refresh_thread = None
         self._process_refresh_worker_obj = None
 
+    def _refresh_process_filter(self) -> None:
+        processes = getattr(self, "_last_process_snapshot", None)
+        if processes is not None:
+            self._render_processes(processes)
+
+    def _filter_processes_for_table(self, processes: list[ProcessInfo]) -> list[ProcessInfo]:
+        query = ""
+        if hasattr(self, "process_search_edit"):
+            query = self.process_search_edit.text().strip().lower()
+        mode = self.process_filter_combo.currentData() if hasattr(self, "process_filter_combo") else "all"
+        sort_mode = self.process_sort_combo.currentData() if hasattr(self, "process_sort_combo") else "cpu"
+
+        visible: list[ProcessInfo] = []
+        for process in processes:
+            protected = self.whitelist.is_whitelisted(process.name, process.exe)
+            if query and query not in process.name.lower() and query not in process.exe.lower() and query != str(process.pid):
+                continue
+            if mode == "load" and process.cpu_percent < 1.0 and process.memory_percent < 1.0:
+                continue
+            if mode == "background" and (process.has_window or process.is_foreground_related):
+                continue
+            if mode == "excluded" and not protected:
+                continue
+            visible.append(process)
+
+        if sort_mode == "ram":
+            visible.sort(key=lambda process: process.memory_rss, reverse=True)
+        elif sort_mode == "name":
+            visible.sort(key=lambda process: process.name.lower())
+        else:
+            visible.sort(key=lambda process: process.cpu_percent, reverse=True)
+        return visible
+
     def _render_processes(self, processes: list[ProcessInfo]) -> None:
         selected_pid: int | None = None
         selected_item = self.process_table.item(self.process_table.currentRow(), 0)
         if selected_item is not None:
             try:
-                selected_pid = int(selected_item.data(Qt.ItemDataRole.UserRole) or selected_item.text())
+                selected_pid = int(selected_item.data(Qt.ItemDataRole.UserRole))
             except (TypeError, ValueError):
                 selected_pid = None
 
+        self._last_process_snapshot = list(processes)
+        visible_processes = self._filter_processes_for_table(self._last_process_snapshot)
         self._process_rows = {process.pid: process for process in processes}
         self.process_table.setUpdatesEnabled(False)
-        self.process_table.setRowCount(len(processes))
-        for row, process in enumerate(processes):
+        self.process_table.setRowCount(len(visible_processes))
+        for row, process in enumerate(visible_processes):
             protected = self.whitelist.is_whitelisted(process.name, process.exe)
+            status_label = "Исключение" if protected else "Активное" if process.is_foreground_related else "Окно" if process.has_window else "Фоновое"
             values = (
-                str(process.pid),
-                process.name,
+                f"{process.name}\nPID {process.pid}",
                 f"{process.cpu_percent:.1f}",
-                f"{process.memory_percent:.1f}",
-                format_bytes(process.memory_rss),
+                f"{format_bytes(process.memory_rss)}\n{process.memory_percent:.1f}%",
                 process.priority,
+                status_label,
                 process.exe,
             )
             for column, value in enumerate(values):
@@ -2010,9 +2358,13 @@ class PCOptimizerQtWindow(QMainWindow):
                     item.setText(value)
                 if column == 0:
                     item.setData(Qt.ItemDataRole.UserRole, process.pid)
+                    item.setToolTip(f"{process.name} · PID {process.pid}\n{process.username}")
+                if column == 5:
+                    item.setToolTip(process.exe)
                 item.setForeground(QColor(self.palette["muted"] if protected else self.palette["text"]))
             if selected_pid == process.pid:
                 self.process_table.selectRow(row)
+            self.process_table.setRowHeight(row, 42)
         self.process_table.setUpdatesEnabled(True)
 
     def _selected_process(self) -> ProcessInfo | None:
@@ -2598,6 +2950,19 @@ class PCOptimizerQtWindow(QMainWindow):
         self.refresh_activity()
 
     def remove_whitelist_selected(self) -> None:
+        selected_count = len(self.names_list.selectedItems()) + len(self.paths_list.selectedItems())
+        if selected_count == 0:
+            QMessageBox.information(self, "Исключения", "Выберите процесс или путь для удаления.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Удалить исключение",
+            f"Удалить выбранные элементы из исключений ({selected_count})?\n\nПосле этого автопилот снова сможет учитывать эти процессы.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
         removed = False
         for item in self.names_list.selectedItems():
             removed = self.whitelist.remove_name(item.text()) or removed
@@ -3334,6 +3699,89 @@ def _qss(palette: dict[str, str]) -> str:
         background: transparent;
         border: none;
     }}
+    QWidget#AppShell, QWidget#MainArea {{
+        background: {palette["bg"]};
+    }}
+    QFrame#Sidebar {{
+        background: {palette["surface"] if "surface" in palette else palette["panel"]};
+        border-right: 1px solid {palette["border"]};
+    }}
+    QLabel#BrandTitle {{
+        color: {palette["text"]};
+        font-size: 15px;
+        font-weight: 750;
+    }}
+    QLabel#BrandSubtitle, QLabel#SidebarFooter {{
+        color: {palette["text_muted"]};
+        font-size: 12px;
+    }}
+    QLabel#BrandIcon {{
+        background: transparent;
+        border: none;
+    }}
+    QPushButton#NavButton {{
+        background: transparent;
+        color: {palette["muted"]};
+        border: 1px solid transparent;
+        border-radius: 8px;
+        padding: 10px 12px;
+        text-align: left;
+        min-height: 46px;
+        font-weight: 650;
+    }}
+    QPushButton#NavButton:hover {{
+        background: {palette["panel_hover"]};
+        color: {palette["text"]};
+        border-color: {palette["border"]};
+    }}
+    QPushButton#NavButton[active="true"] {{
+        background: {_with_alpha(palette["accent"], 35)};
+        color: {palette["text"]};
+        border-color: {_with_alpha(palette["accent"], 140)};
+    }}
+    QFrame#SidebarStatusCard {{
+        background: {palette["panel_2"]};
+        border: 1px solid {palette["border"]};
+        border-radius: 8px;
+    }}
+    QLabel#SidebarCardTitle {{
+        color: {palette["text"]};
+        font-weight: 750;
+    }}
+    QPushButton#SidebarPrimaryButton {{
+        background: {palette["accent"]};
+        color: {palette["bg"]};
+        border: none;
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-weight: 750;
+    }}
+    QPushButton#SidebarPrimaryButton:hover {{
+        background: {palette["accent_hover"]};
+    }}
+    QFrame#Topbar {{
+        background: {palette["bg"]};
+        border-bottom: 1px solid {palette["border"]};
+    }}
+    QLabel#TopbarTitle {{
+        color: {palette["text"]};
+        font-size: 24px;
+        font-weight: 750;
+    }}
+    QLabel#TopbarDescription {{
+        color: {palette["muted"]};
+        font-size: 13px;
+    }}
+    QLabel#MonitoringIndicator {{
+        color: {palette["good"]};
+        font-size: 12px;
+        font-weight: 650;
+        padding: 6px 8px;
+    }}
+    QStackedWidget#PageStack {{
+        background: {palette["bg"]};
+        border: none;
+    }}
     QTabWidget::pane {{
         border: 1px solid {palette["border"]};
         border-radius: 12px;
@@ -3361,12 +3809,30 @@ def _qss(palette: dict[str, str]) -> str:
     QFrame#MetricCard, QFrame#SettingsSection, QFrame#CollapsibleSection, QFrame#InlinePanel {{
         background: {palette["panel"]};
         border: 1px solid {palette["border"]};
-        border-radius: 12px;
+        border-radius: 8px;
     }}
     QFrame#SettingsFooter {{
         background: {palette["panel"]};
         border: 1px solid {palette["border"]};
         border-radius: 12px;
+    }}
+    QFrame#SettingsNav {{
+        background: {palette["panel"]};
+        border: 1px solid {palette["border"]};
+        border-radius: 8px;
+    }}
+    QPushButton#SettingsNavButton {{
+        background: transparent;
+        color: {palette["muted"]};
+        border: 1px solid transparent;
+        border-radius: 7px;
+        padding: 8px 10px;
+        text-align: left;
+    }}
+    QPushButton#SettingsNavButton:hover {{
+        background: {palette["panel_hover"]};
+        color: {palette["text"]};
+        border-color: {palette["border"]};
     }}
     QFrame#MonitorBottomBar {{
         background: {palette["panel"]};
@@ -3440,7 +3906,7 @@ def _qss(palette: dict[str, str]) -> str:
     }}
     QPushButton:hover, QToolButton:hover {{
         border-color: {palette["accent"]};
-        background: {palette["input"]};
+        background: {palette["panel_hover"]};
     }}
     QPushButton:pressed, QToolButton:pressed {{
         border-color: {_mix(QColor(palette["accent"]), QColor(palette["text"]), 0.28).name()};
@@ -3478,6 +3944,13 @@ def _qss(palette: dict[str, str]) -> str:
         border: 1px solid {palette["border"]};
         border-radius: 8px;
         padding: 7px;
+    }}
+    QLineEdit:focus, QComboBox:focus {{
+        border-color: {palette["accent"]};
+    }}
+    QLineEdit#SearchInput {{
+        padding-left: 10px;
+        min-height: 28px;
     }}
     QLabel#FormLabel {{
         color: {palette["muted"]};
@@ -3569,10 +4042,43 @@ def _qss(palette: dict[str, str]) -> str:
         background: transparent;
         border: none;
     }}
-    QFrame#OptimizeHero {{
+    QFrame#OptimizeHero, QFrame#HealthStatusCard {{
         background: {palette["panel"]};
         border: 1px solid {palette["border"]};
-        border-radius: 14px;
+        border-radius: 8px;
+    }}
+    QLabel#HealthDot {{
+        color: {palette["good"]};
+        font-size: 22px;
+        font-weight: 800;
+    }}
+    QLabel#HealthAdmin {{
+        color: {palette["muted"]};
+        background: {palette["panel_2"]};
+        border: 1px solid {palette["border"]};
+        border-radius: 8px;
+        padding: 7px 10px;
+    }}
+    QFrame#SegmentedControl {{
+        background: {palette["input"]};
+        border: 1px solid {palette["border"]};
+        border-radius: 8px;
+    }}
+    QPushButton#SegmentButton {{
+        background: transparent;
+        color: {palette["muted"]};
+        border: none;
+        border-radius: 6px;
+        padding: 7px 12px;
+        min-width: 76px;
+    }}
+    QPushButton#SegmentButton:hover {{
+        color: {palette["text"]};
+        background: {palette["panel_hover"]};
+    }}
+    QPushButton#SegmentButton[active="true"] {{
+        color: {palette["text"]};
+        background: {palette["panel_2"]};
     }}
     QFrame#UpdateBanner {{
         background: {_with_alpha(palette["warn"], 35)};
@@ -3603,14 +4109,14 @@ def _qss(palette: dict[str, str]) -> str:
         background: {palette["accent"]};
         color: {palette["bg"]};
         border: none;
-        border-radius: 18px;
-        padding: 15px 28px;
-        font-size: 19px;
+        border-radius: 8px;
+        padding: 11px 18px;
+        font-size: 15px;
         font-weight: 800;
-        min-width: 340px;
+        min-width: 210px;
     }}
     QPushButton#OptimizeButton:hover {{
-        background: {_mix(QColor(palette["accent"]), QColor(palette["good"]), 0.18).name()};
+        background: {palette["accent_hover"]};
     }}
     QPushButton#OptimizeButton:pressed {{
         background: {_mix(QColor(palette["accent"]), QColor(palette["text"]), 0.18).name()};

@@ -45,6 +45,41 @@ from pc_optimizer_lite.updater import (
 from pc_optimizer_lite.visual_effects import VISUAL_EFFECT_SETTINGS, VisualEffectSetting, VisualEffectsManager
 from pc_optimizer_lite.whitelist import Whitelist
 from pc_optimizer_lite.runtime_policy import sleep_wake_poll_policy
+from pc_optimizer_lite.ui_model import (
+    DEFAULT_NAV_PAGES,
+    PROMPT_DARK_TOKENS,
+    build_design_palette,
+    evaluate_system_health,
+)
+
+
+class UiModelTests(unittest.TestCase):
+    def test_prompt_navigation_order_and_labels_are_stable(self) -> None:
+        self.assertEqual([page.page_id for page in DEFAULT_NAV_PAGES], ["overview", "processes", "activity", "exceptions", "settings"])
+        self.assertEqual([page.title for page in DEFAULT_NAV_PAGES], ["Обзор", "Процессы", "Активность", "Исключения", "Настройки"])
+        self.assertEqual(DEFAULT_NAV_PAGES[0].topbar_title, "Обзор системы")
+        self.assertEqual(DEFAULT_NAV_PAGES[1].topbar_title, "Процессы")
+
+    def test_prompt_dark_tokens_are_used_by_design_palette(self) -> None:
+        palette = build_design_palette("dark")
+
+        self.assertEqual(palette["bg"], PROMPT_DARK_TOKENS.background)
+        self.assertEqual(palette["panel"], PROMPT_DARK_TOKENS.surface)
+        self.assertEqual(palette["panel_2"], PROMPT_DARK_TOKENS.surface_elevated)
+        self.assertEqual(palette["panel_hover"], PROMPT_DARK_TOKENS.surface_hover)
+        self.assertEqual(palette["accent"], PROMPT_DARK_TOKENS.accent_blue)
+        self.assertEqual(palette["accent_hover"], PROMPT_DARK_TOKENS.accent_blue_hover)
+        self.assertEqual(palette["good"], PROMPT_DARK_TOKENS.success)
+
+    def test_system_health_status_warns_about_pressure(self) -> None:
+        good = evaluate_system_health(cpu_percent=22.0, ram_percent=42.0, disk_percent=54.0, swap_percent=2.0)
+        warning = evaluate_system_health(cpu_percent=42.0, ram_percent=72.0, disk_percent=83.0, swap_percent=11.0)
+        danger = evaluate_system_health(cpu_percent=94.0, ram_percent=91.0, disk_percent=88.0, swap_percent=76.0)
+
+        self.assertEqual(good.severity, "good")
+        self.assertEqual(warning.severity, "warn")
+        self.assertEqual(danger.severity, "bad")
+        self.assertIn("Нагрузка", danger.title)
 
 
 class ConfigTests(unittest.TestCase):
