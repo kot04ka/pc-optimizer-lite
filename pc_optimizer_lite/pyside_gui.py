@@ -71,17 +71,18 @@ from .pagefile import (
     set_windows_auto_pagefile,
 )
 from .ram_cleaner import MEMORY_PURGE_STANDBY_LIST, RamCleanMode, RamCleaner, RamCleanResult, is_admin, purge_memory_list
+from .runtime_policy import sleep_wake_poll_policy
 from .sleep_manager import SleepAction, SleepManager
 from .smart_process_manager import CloseCandidate, SmartProcessManager
 from .updater import UpdateCheckResult, UpdateError, check_for_updates, download_and_install_update, is_repository_configured
 from .version import APP_VERSION
+from .visual_effects import VisualEffectsManager
 from .whitelist import Whitelist
 
 LOGGER = logging.getLogger(__name__)
 STARTUP_MONITOR_DELAY_MS = 1200
 STARTUP_LITE_PROMPT_DELAY_MS = 2500
 STARTUP_UPDATE_CHECK_DELAY_MS = 8000
-SLEEP_WAKE_POLL_MS = 500
 
 
 THEMES = {
@@ -703,6 +704,7 @@ class PCOptimizerQtWindow(QMainWindow):
         self.ram_cleaner = ram_cleaner
         self.cpu_optimizer = cpu_optimizer
         self.cpu_throttler = cpu_throttler
+        self.visual_effects = VisualEffectsManager()
         self.palette = THEMES[self.config.theme]
         self.bridge = SnapshotBridge()
         self.bridge.snapshot_received.connect(self._render_snapshot)
@@ -758,7 +760,6 @@ class PCOptimizerQtWindow(QMainWindow):
         self.activity_timer.start(15000)
         self.sleep_wake_timer = QTimer(self)
         self.sleep_wake_timer.timeout.connect(self._poll_sleep_wake_only)
-        self.sleep_wake_timer.start(SLEEP_WAKE_POLL_MS)
         self._apply_runtime_performance_mode()
         QTimer.singleShot(STARTUP_LITE_PROMPT_DELAY_MS, self._maybe_offer_lite_mode)
         QTimer.singleShot(STARTUP_UPDATE_CHECK_DELAY_MS, self._maybe_check_updates_on_startup)
@@ -1126,6 +1127,11 @@ class PCOptimizerQtWindow(QMainWindow):
         self.auto_priority_check = _toggle("Автоматически снижать приоритет тяжёлых процессов")
         self.auto_priority_check.setChecked(self.config.auto_lower_priority_enabled)
         self.auto_priority_check.setToolTip("Мягкий fallback: снижает priority только у безопасных фоновых кандидатов.")
+        self.visual_effects_check = _toggle("Отключать визуальные эффекты Windows в low-power режиме")
+        self.visual_effects_check.setChecked(self.config.visual_effects_low_power_enabled)
+        self.visual_effects_check.setToolTip(
+            "Временно отключает часть анимаций Windows и восстанавливает исходные значения при выходе."
+        )
 
         self.auto_close_combo = QComboBox()
         self.auto_close_combo.addItem("Выключено", "off")
@@ -1249,6 +1255,7 @@ class PCOptimizerQtWindow(QMainWindow):
         _form_row(monitoring_form, "", self.observation_only_check)
         _form_row(monitoring_form, "", self.autostart_check)
         _form_row(monitoring_form, "", self.lite_mode_check)
+        _form_row(monitoring_form, "", self.visual_effects_check)
         _form_row(monitoring_form, "", self.reset_optimal_button)
         _form_row(monitoring_form, "Интервал мониторинга, сек", self.interval_edit)
         _form_row(monitoring_form, "Интервал обновления процессов, сек", self.process_interval_edit)
@@ -1492,6 +1499,8 @@ class PCOptimizerQtWindow(QMainWindow):
         self._apply_runtime_performance_mode()
         if not self.isVisible() or self.isMinimized():
             self._enter_background_mode()
+        self._apply_visual_effects_mode()
+        self._sync_sleep_wake_timer()
         self._refresh_tray_state()
 
     def _sync_controls_from_config(self) -> None:
@@ -1508,6 +1517,7 @@ class PCOptimizerQtWindow(QMainWindow):
             self.ram_threshold_edit.setText(str(self.config.ram_threshold_percent))
             self.cooldown_edit.setText(str(self.config.notification_cooldown_seconds))
             self.lite_mode_check.setChecked(self.config.lite_mode_enabled)
+            self.visual_effects_check.setChecked(self.config.visual_effects_low_power_enabled)
             self.interval_edit.setText(str(self.config.monitor_interval_seconds))
             self.process_interval_edit.setText(str(self.config.process_refresh_seconds))
             self.auto_close_combo.setCurrentIndex({"off": 0, "ask": 1, "auto": 2}.get(self.config.auto_close_mode, 0))
@@ -1813,6 +1823,9 @@ class PCOptimizerQtWindow(QMainWindow):
     def _on_optimization_result(self, result: OptimizationResult) -> None:
         self._last_optimization_result = result
         self.refresh_activity()
+        sync_sleep_wake_timer = getattr(self, "_sync_sleep_wake_timer", None)
+        if sync_sleep_wake_timer:
+            sync_sleep_wake_timer()
         if not self._optimization_quiet or (
             self.isVisible() and not self.isMinimized() and self.tabs.currentWidget() == self.processes_tab
         ):
@@ -2228,10 +2241,12 @@ class PCOptimizerQtWindow(QMainWindow):
     def _poll_sleep_wake_only(self) -> None:
         actions = self.sleep_manager.resume_user_target_if_sleeping()
         if not actions:
+            self._sync_sleep_wake_timer()
             return
         for action in actions:
             self._log_sleep_action(action)
         self.refresh_activity()
+        self._sync_sleep_wake_timer()
 
     def _poll_sleep_manager(self) -> None:
         enabled = self.config.sleep_enabled and not self.config.observation_only_mode
@@ -2244,6 +2259,7 @@ class PCOptimizerQtWindow(QMainWindow):
             for action in actions:
                 self._log_sleep_action(action)
             self.refresh_activity()
+        self._sync_sleep_wake_timer()
 
     def _log_sleep_action(self, action: SleepAction) -> None:
         if action.success:
@@ -2652,6 +2668,7 @@ class PCOptimizerQtWindow(QMainWindow):
                 return False
             self.config.observation_only_mode = self.observation_only_check.isChecked()
             self.config.lite_mode_enabled = self.lite_mode_check.isChecked()
+            self.config.visual_effects_low_power_enabled = self.visual_effects_check.isChecked()
             self.config.monitor_interval_seconds = float(self.interval_edit.text())
             self.config.process_refresh_seconds = float(self.process_interval_edit.text())
             self.config.cpu_threshold_percent = float(self.cpu_threshold_edit.text())
@@ -2976,6 +2993,45 @@ class PCOptimizerQtWindow(QMainWindow):
             self.activity_timer.setInterval(25000 if self.config.lite_mode_enabled else 15000)
         if self.isVisible() and not self.isMinimized():
             self._enter_foreground_mode()
+        self._apply_visual_effects_mode()
+        self._sync_sleep_wake_timer()
+
+    def _apply_visual_effects_mode(self) -> None:
+        should_apply = bool(self.config.visual_effects_low_power_enabled)
+        if should_apply and not self.visual_effects.active:
+            if self.visual_effects.apply_low_power():
+                self.history.add_event(
+                    "settings",
+                    "Low-power visual effects applied",
+                    "Windows animations were reduced for lower background overhead.",
+                    "info",
+                )
+            return
+        if not should_apply and self.visual_effects.active and self.config.visual_effects_restore_on_exit:
+            if self.visual_effects.restore():
+                self.history.add_event(
+                    "settings",
+                    "Visual effects restored",
+                    "Windows animation settings were restored.",
+                    "success",
+                )
+
+    def _sync_sleep_wake_timer(self) -> None:
+        if not hasattr(self, "sleep_wake_timer"):
+            return
+        background = not (self.isVisible() and not self.isMinimized())
+        enabled, interval = sleep_wake_poll_policy(
+            self.config,
+            sleeping_count=len(self.sleep_manager.sleeping),
+            background=background,
+        )
+        if not enabled:
+            self.sleep_wake_timer.stop()
+            return
+        if self.sleep_wake_timer.interval() != interval:
+            self.sleep_wake_timer.setInterval(interval)
+        if not self.sleep_wake_timer.isActive():
+            self.sleep_wake_timer.start()
 
     def _maybe_offer_lite_mode(self) -> None:
         if self.config.lite_mode_enabled or self.config.lite_mode_prompted:
@@ -2995,6 +3051,7 @@ class PCOptimizerQtWindow(QMainWindow):
         )
         if answer == QMessageBox.StandardButton.Yes:
             self.config.lite_mode_enabled = True
+            self.config.visual_effects_low_power_enabled = True
             self.config.monitor_interval_seconds = max(self.config.monitor_interval_seconds, 3.5)
             self.config.process_refresh_seconds = max(self.config.process_refresh_seconds, 12.0)
             self.config.cpu_optimizer_max_processes = min(self.config.cpu_optimizer_max_processes, 2)
@@ -3016,6 +3073,7 @@ class PCOptimizerQtWindow(QMainWindow):
         self.graph.set_live_updates_enabled(False)
         if hasattr(self, "activity_timer"):
             self.activity_timer.setInterval(45000 if self.config.lite_mode_enabled else 30000)
+        self._sync_sleep_wake_timer()
 
     def _enter_foreground_mode(self) -> None:
         self.monitor.interval_seconds = self._foreground_monitor_interval
@@ -3025,6 +3083,7 @@ class PCOptimizerQtWindow(QMainWindow):
         self._sync_process_collection_mode()
         if hasattr(self, "activity_timer"):
             self.activity_timer.setInterval(25000 if self.config.lite_mode_enabled else 15000)
+        self._sync_sleep_wake_timer()
 
     def _sync_process_collection_mode(self) -> None:
         visible = self.isVisible() and not self.isMinimized()
@@ -3068,6 +3127,8 @@ class PCOptimizerQtWindow(QMainWindow):
         self.cpu_optimizer.restore_all("app exit")
         for entry in list(self.sleep_manager.sleeping):
             self.sleep_manager.resume_process(entry.pid, "app exit")
+        if self.config.visual_effects_restore_on_exit:
+            self.visual_effects.restore()
         self.monitor.stop()
         self.tray.hide()
         QApplication.instance().quit()

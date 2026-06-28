@@ -176,6 +176,7 @@ class CpuThrottler:
                 name=process.name,
                 has_window=bool(getattr(process, "has_window", False)),
                 is_foreground_related=bool(getattr(process, "is_foreground_related", False)),
+                check_current_foreground=False,
             ):
                 continue
             if not _is_process_info_normal_priority(process.priority):

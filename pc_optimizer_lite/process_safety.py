@@ -52,6 +52,7 @@ def is_interactive_process(
     has_window: bool = False,
     is_foreground_related: bool = False,
     foreground_pid: int | None = None,
+    check_current_foreground: bool = True,
 ) -> bool:
     """Return True for processes that should never be priority/affinity-limited."""
 
@@ -59,5 +60,5 @@ def is_interactive_process(
         bool(is_foreground_related)
         or bool(has_window)
         or is_known_interactive_process_name(name)
-        or is_pid_foreground_related(pid, foreground_pid)
+        or (check_current_foreground and is_pid_foreground_related(pid, foreground_pid))
     )

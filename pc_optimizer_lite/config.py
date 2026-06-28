@@ -19,7 +19,7 @@ DEFAULT_LOG_FILENAME = "pc_optimizer_lite.log"
 DEFAULT_GITHUB_OWNER = "kot04ka"
 DEFAULT_GITHUB_REPO = "pc-optimizer-lite"
 DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 4.0
-CONFIG_SCHEMA_VERSION = 7
+CONFIG_SCHEMA_VERSION = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +42,8 @@ class AppConfig:
     process_refresh_seconds: float = 6.0
     lite_mode_enabled: bool = False
     lite_mode_prompted: bool = False
+    visual_effects_low_power_enabled: bool = False
+    visual_effects_restore_on_exit: bool = True
     cpu_threshold_percent: float = 85.0
     cpu_sustain_seconds: float = 2.8
     ram_threshold_percent: float = 85.0
@@ -147,6 +149,8 @@ def sanitize_config(config: AppConfig) -> AppConfig:
     )
     config.lite_mode_enabled = bool(config.lite_mode_enabled)
     config.lite_mode_prompted = bool(config.lite_mode_prompted)
+    config.visual_effects_low_power_enabled = bool(config.visual_effects_low_power_enabled)
+    config.visual_effects_restore_on_exit = bool(config.visual_effects_restore_on_exit)
     config.optimal_preset_tier = (
         config.optimal_preset_tier
         if config.optimal_preset_tier in {"low", "balanced", "high"}
@@ -322,6 +326,7 @@ def apply_optimal_preset(config: AppConfig, profile: HardwareProfile | None = No
     config.periodic_optimization_notify = True
     config.cleanup_recycle_bin_enabled = False
     config.cleanup_prefetch_enabled = False
+    config.visual_effects_restore_on_exit = True
 
     config.cpu_threshold_percent = 85.0
     config.cpu_sustain_seconds = 3.0
@@ -334,6 +339,7 @@ def apply_optimal_preset(config: AppConfig, profile: HardwareProfile | None = No
 
     if tier == "low":
         config.lite_mode_enabled = True
+        config.visual_effects_low_power_enabled = True
         config.monitor_interval_seconds = 3.5
         config.process_refresh_seconds = 12.0
         config.cpu_optimizer_max_processes = 2
@@ -343,12 +349,14 @@ def apply_optimal_preset(config: AppConfig, profile: HardwareProfile | None = No
         config.periodic_optimization_interval_minutes = 20.0
     elif tier == "high":
         config.lite_mode_enabled = False
+        config.visual_effects_low_power_enabled = False
         config.monitor_interval_seconds = 2.5
         config.process_refresh_seconds = 6.0
         config.cpu_optimizer_max_processes = 4
         config.sleep_after_minutes = 12.0
     else:
         config.lite_mode_enabled = False
+        config.visual_effects_low_power_enabled = False
         config.monitor_interval_seconds = 3.0
         config.process_refresh_seconds = 6.0
         config.cpu_optimizer_max_processes = 3
@@ -456,6 +464,10 @@ def _migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
         migrated.setdefault("optimal_preset_tier", "balanced")
         migrated.setdefault("optimal_preset_applied", False)
         migrated["config_version"] = 7
+    if version < 8:
+        migrated.setdefault("visual_effects_low_power_enabled", False)
+        migrated.setdefault("visual_effects_restore_on_exit", True)
+        migrated["config_version"] = 8
     return migrated
 
 

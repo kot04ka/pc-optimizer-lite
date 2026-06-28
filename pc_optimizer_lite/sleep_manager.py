@@ -174,6 +174,8 @@ class SleepManager:
                 has_visible_window=bool(has_visible_window),
                 window_title=window_title,
             )
+            if decision.strategy == "suspend" and (_has_active_network(proc) or self._has_active_io(proc)):
+                return None
             previous_priority = _safe_nice(proc)
             if os.name == "nt":
                 proc.nice(psutil.IDLE_PRIORITY_CLASS)
@@ -238,6 +240,8 @@ class SleepManager:
                 window_title=window_title,
             )
             proc = psutil.Process(pid)
+            if decision.strategy == "suspend" and (_has_active_network(proc) or self._has_active_io(proc)):
+                return None
             if previous_priority is None:
                 previous_priority = _safe_nice(proc)
             if os.name == "nt":
@@ -327,10 +331,6 @@ class SleepManager:
             return False
         foreground_pid = get_foreground_pid()
         if foreground_pid and is_related_to_pid(proc.pid, foreground_pid):
-            return False
-        if _has_active_network(proc):
-            return False
-        if self._has_active_io(proc):
             return False
         return True
 

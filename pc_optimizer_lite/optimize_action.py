@@ -51,9 +51,6 @@ SLEEP_MIN_RSS_BYTES = 100 * 1024 * 1024
 MEDIA_OR_BACKGROUND_NAMES = {
     "audiodg.exe",
     "discord.exe",
-    "firefox.exe",
-    "chrome.exe",
-    "msedge.exe",
     "obs64.exe",
     "onedrive.exe",
     "spotify.exe",
@@ -584,11 +581,9 @@ def _classify_processes(
             plan.ram_clean.append(item)
 
         if _is_sleep_candidate(item, idle_age):
-            _ensure_network_checked(item)
-            if not item.active_network:
-                plan.sleep.append(item)
-                if eco_mode:
-                    continue
+            plan.sleep.append(item)
+            if eco_mode:
+                continue
 
         if not eco_mode and _is_safe_close_candidate(item, config, min_age):
             _ensure_network_checked(item)
