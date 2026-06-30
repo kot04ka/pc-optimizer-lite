@@ -77,7 +77,7 @@ from .smart_process_manager import CloseCandidate, SmartProcessManager
 from .ui_model import DEFAULT_NAV_PAGES, SETTINGS_LAYOUT, TOPBAR_ACTIONS_LABEL, build_design_palette, evaluate_system_health
 from .updater import UpdateCheckResult, UpdateError, check_for_updates, download_and_install_update, is_repository_configured
 from .version import APP_VERSION
-from .visual_effects import VisualEffectsManager
+from .visual_effects import EFFECTS, PRESETS, PRESET_LABELS, VisualEffectsManager
 from .whitelist import Whitelist
 
 LOGGER = logging.getLogger(__name__)
@@ -694,6 +694,8 @@ class PCOptimizerQtWindow(QMainWindow):
         self._last_periodic_optimization_at = time.monotonic()
         self._last_scheduled_cleanup_at = time.monotonic()
         self._last_auto_ram_clean_at = 0.0
+        self._threshold_over_since: float | None = None
+        self._last_threshold_autopilot_at: float = 0.0
         self._last_threshold_cpu_optimization_at = 0.0
         self._last_sleep_poll_at = 0.0
         self._foreground_monitor_interval = self.config.monitor_interval_seconds
@@ -1372,6 +1374,24 @@ class PCOptimizerQtWindow(QMainWindow):
             "В low-power режиме временно отключает анимации, fade, тени и UI effects Windows. "
             "Исходные значения восстанавливаются при выключении опции или выходе."
         )
+        self.vfx_auto_on_load_check = _toggle("Применять эффекты при запуске")
+        self.vfx_auto_on_load_check.setChecked(self.config.visual_effects_auto_on_load)
+        self.vfx_auto_on_load_check.setToolTip("Автоматически применять выбранные настройки эффектов при каждом запуске программы.")
+        self.vfx_preset_btns: dict[str, QPushButton] = {}
+        for pid, plabel in PRESET_LABELS.items():
+            btn = QPushButton(plabel)
+            btn.setCheckable(True)
+            btn.setObjectName("SegmentButton")
+            btn.clicked.connect(lambda checked, p=pid: self._on_vfx_preset(p))
+            self.vfx_preset_btns[pid] = btn
+        self.vfx_effect_checks: dict[str, QCheckBox] = {}
+        for effect in EFFECTS:
+            cb = _toggle(effect.label)
+            cb.setToolTip(effect.description)
+            self.vfx_effect_checks[effect.id] = cb
+        self.vfx_apply_btn = _button("Применить сейчас", "check", self._apply_vfx_now, self.palette)
+        self.vfx_restore_btn = _button("Восстановить исходные", "refresh", self._restore_vfx, self.palette)
+        self._refresh_vfx_checkboxes()
 
         self.auto_close_combo = QComboBox()
         self.auto_close_combo.addItem("Выключено", "off")
@@ -1571,6 +1591,31 @@ class PCOptimizerQtWindow(QMainWindow):
         _form_row(periodic_form, "", self.periodic_eco_check)
         _form_row(periodic_form, "", self.periodic_notify_check)
         content_layout.addWidget(periodic_section)
+
+        vfx_section, vfx_form = _settings_section("Визуальные эффекты Windows", self.palette)
+        _form_row(vfx_form, "", self.vfx_auto_on_load_check)
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(6)
+        for btn in self.vfx_preset_btns.values():
+            preset_row.addWidget(btn)
+        preset_row.addStretch()
+        vfx_form.addRow(preset_row)
+        for cb in self.vfx_effect_checks.values():
+            _form_row(vfx_form, "", cb)
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        action_row.addWidget(self.vfx_apply_btn)
+        action_row.addWidget(self.vfx_restore_btn)
+        action_row.addStretch()
+        vfx_form.addRow(action_row)
+        vfx_hint = QLabel(
+            "Изменения применяются мгновенно. «Восстановить» возвращает значения, которые были до первого применения. "
+            "Некоторые эффекты (прозрачность, панель задач) требуют перезапуска Explorer для полного эффекта."
+        )
+        vfx_hint.setObjectName("SettingsHint")
+        vfx_hint.setWordWrap(True)
+        vfx_form.addRow(vfx_hint)
+        content_layout.addWidget(vfx_section)
 
         steps_section, steps_form = _settings_section("Пошаговая оптимизация", self.palette)
         for checkbox in self.optimization_step_checks.values():
@@ -1821,6 +1866,8 @@ class PCOptimizerQtWindow(QMainWindow):
             self.cooldown_edit.setText(str(self.config.notification_cooldown_seconds))
             self.lite_mode_check.setChecked(self.config.lite_mode_enabled)
             self.visual_effects_check.setChecked(self.config.visual_effects_low_power_enabled)
+            self.vfx_auto_on_load_check.setChecked(self.config.visual_effects_auto_on_load)
+            self._refresh_vfx_checkboxes()
             self.interval_edit.setText(str(self.config.monitor_interval_seconds))
             self.process_interval_edit.setText(str(self.config.process_refresh_seconds))
             self.auto_close_combo.setCurrentIndex({"off": 0, "ask": 1, "auto": 2}.get(self.config.auto_close_mode, 0))
@@ -1980,6 +2027,7 @@ class PCOptimizerQtWindow(QMainWindow):
             self._maybe_smart_close(snapshot)
             self._maybe_scheduled_auto_cleanup(snapshot)
             self._maybe_periodic_optimization(snapshot)
+            self._maybe_threshold_autopilot(snapshot)
 
     def _update_health_status(self, snapshot: MonitorSnapshot, max_disk: float) -> None:
         status = evaluate_system_health(
@@ -2604,6 +2652,82 @@ class PCOptimizerQtWindow(QMainWindow):
         if candidates:
             self.refresh_activity()
 
+    def _refresh_vfx_checkboxes(self) -> None:
+        disabled = set(self.config.visual_effects_disabled_ids)
+        for eid, cb in self.vfx_effect_checks.items():
+            cb.blockSignals(True)
+            cb.setChecked(eid not in disabled)
+            cb.blockSignals(False)
+        preset = self.config.visual_effects_preset
+        for pid, btn in self.vfx_preset_btns.items():
+            btn.setChecked(pid == preset)
+
+    def _on_vfx_preset(self, preset: str) -> None:
+        disabled = list(PRESETS.get(preset, set()))
+        self.config.visual_effects_preset = preset
+        self.config.visual_effects_disabled_ids = disabled
+        self._refresh_vfx_checkboxes()
+
+    def _apply_vfx_now(self) -> None:
+        disabled = {eid for eid, cb in self.vfx_effect_checks.items() if not cb.isChecked()}
+        self.config.visual_effects_disabled_ids = list(disabled)
+        self.config.visual_effects_preset = _detect_vfx_preset(disabled)
+        self._refresh_vfx_checkboxes()
+        count = self.visual_effects.apply_disabled_set(disabled)
+        self.history.add_event(
+            "settings",
+            f"Визуальные эффекты: {len(disabled)} отключено",
+            f"Применено {count} изменений (пресет: {self.config.visual_effects_preset})",
+            "info",
+        )
+        self._save_config()
+
+    def _restore_vfx(self) -> None:
+        if self.visual_effects.restore():
+            self.history.add_event("settings", "Визуальные эффекты восстановлены", "Возвращены исходные системные настройки", "info")
+        self.config.visual_effects_disabled_ids = []
+        self.config.visual_effects_preset = "custom"
+        self._refresh_vfx_checkboxes()
+        self._save_config()
+
+    def _maybe_threshold_autopilot(self, snapshot: MonitorSnapshot) -> None:
+        if self.config.observation_only_mode or self.config.automation_mode != "autopilot":
+            return
+        if self._optimization_thread and self._optimization_thread.isRunning():
+            return
+        over = (
+            snapshot.cpu_percent >= self.config.cpu_threshold_percent
+            or snapshot.ram_percent >= self.config.ram_threshold_percent
+        )
+        now = time.monotonic()
+        if not over:
+            self._threshold_over_since = None
+            return
+        if self._threshold_over_since is None:
+            self._threshold_over_since = now
+            return
+        sustained = now - self._threshold_over_since
+        if sustained < self.config.cpu_sustain_seconds * 4:
+            return
+        if now - self._last_threshold_autopilot_at < 300.0:
+            return
+        if self._user_recently_active(snapshot):
+            return
+        self._last_threshold_autopilot_at = now
+        self._threshold_over_since = None
+        started = self._start_optimization(eco_mode=True, quiet=True)
+        if started:
+            LOGGER.info(
+                "Threshold autopilot: CPU=%.0f%% RAM=%.0f%% sustained=%.0fs",
+                snapshot.cpu_percent, snapshot.ram_percent, sustained,
+            )
+            self.history.add_event(
+                "optimization",
+                "Автопилот: устойчивая нагрузка",
+                f"CPU {snapshot.cpu_percent:.0f}% / RAM {snapshot.ram_percent:.0f}% — тихая eco-оптимизация",
+                "info",
+            )
+
     def _maybe_periodic_optimization(self, snapshot: MonitorSnapshot) -> None:
         if self.config.observation_only_mode or not self.config.periodic_optimization_enabled:
             return
@@ -3086,6 +3210,10 @@ class PCOptimizerQtWindow(QMainWindow):
             self.config.observation_only_mode = self.observation_only_check.isChecked()
             self.config.lite_mode_enabled = self.lite_mode_check.isChecked()
             self.config.visual_effects_low_power_enabled = self.visual_effects_check.isChecked()
+            self.config.visual_effects_auto_on_load = self.vfx_auto_on_load_check.isChecked()
+            disabled = {eid for eid, cb in self.vfx_effect_checks.items() if not cb.isChecked()}
+            self.config.visual_effects_disabled_ids = list(disabled)
+            self.config.visual_effects_preset = _detect_vfx_preset(disabled)
             self.config.monitor_interval_seconds = float(self.interval_edit.text())
             self.config.process_refresh_seconds = float(self.process_interval_edit.text())
             self.config.cpu_threshold_percent = float(self.cpu_threshold_edit.text())
@@ -3414,22 +3542,24 @@ class PCOptimizerQtWindow(QMainWindow):
         self._sync_sleep_wake_timer()
 
     def _apply_visual_effects_mode(self) -> None:
-        should_apply = bool(self.config.visual_effects_low_power_enabled)
-        if should_apply and not self.visual_effects.active:
-            if self.visual_effects.apply_low_power():
+        if not self.config.visual_effects_auto_on_load and not self.visual_effects.active:
+            return
+        disabled = set(self.config.visual_effects_disabled_ids)
+        if disabled and not self.visual_effects.active:
+            count = self.visual_effects.apply_disabled_set(disabled)
+            if count:
                 self.history.add_event(
                     "settings",
-                    "Low-power visual effects applied",
-                    "Windows animations were reduced for lower background overhead.",
+                    f"Визуальные эффекты: {len(disabled)} отключено",
+                    f"Применено при запуске (пресет: {self.config.visual_effects_preset})",
                     "info",
                 )
-            return
-        if not should_apply and self.visual_effects.active and self.config.visual_effects_restore_on_exit:
+        elif not disabled and self.visual_effects.active and self.config.visual_effects_restore_on_exit:
             if self.visual_effects.restore():
                 self.history.add_event(
                     "settings",
-                    "Visual effects restored",
-                    "Windows animation settings were restored.",
+                    "Визуальные эффекты восстановлены",
+                    "Системные настройки возвращены к исходным значениям.",
                     "success",
                 )
 
@@ -3740,6 +3870,13 @@ def _safe_float(value: str, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _detect_vfx_preset(disabled_ids: set[str]) -> str:
+    for pid, preset_disabled in PRESETS.items():
+        if disabled_ids == preset_disabled:
+            return pid
+    return "custom"
 
 
 def _qss(palette: dict[str, str]) -> str:

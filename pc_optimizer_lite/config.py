@@ -19,7 +19,7 @@ DEFAULT_LOG_FILENAME = "pc_optimizer_lite.log"
 DEFAULT_GITHUB_OWNER = "kot04ka"
 DEFAULT_GITHUB_REPO = "pc-optimizer-lite"
 DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 4.0
-CONFIG_SCHEMA_VERSION = 8
+CONFIG_SCHEMA_VERSION = 9
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +44,9 @@ class AppConfig:
     lite_mode_prompted: bool = False
     visual_effects_low_power_enabled: bool = False
     visual_effects_restore_on_exit: bool = True
+    visual_effects_preset: str = "custom"
+    visual_effects_disabled_ids: list[str] = field(default_factory=list)
+    visual_effects_auto_on_load: bool = False
     cpu_threshold_percent: float = 85.0
     cpu_sustain_seconds: float = 2.8
     ram_threshold_percent: float = 85.0
@@ -151,6 +154,17 @@ def sanitize_config(config: AppConfig) -> AppConfig:
     config.lite_mode_prompted = bool(config.lite_mode_prompted)
     config.visual_effects_low_power_enabled = bool(config.visual_effects_low_power_enabled)
     config.visual_effects_restore_on_exit = bool(config.visual_effects_restore_on_exit)
+    config.visual_effects_preset = (
+        config.visual_effects_preset
+        if config.visual_effects_preset in {"performance", "balanced", "appearance", "custom"}
+        else "custom"
+    )
+    if not isinstance(config.visual_effects_disabled_ids, list):
+        config.visual_effects_disabled_ids = []
+    config.visual_effects_disabled_ids = [
+        s for s in config.visual_effects_disabled_ids if isinstance(s, str)
+    ]
+    config.visual_effects_auto_on_load = bool(config.visual_effects_auto_on_load)
     config.optimal_preset_tier = (
         config.optimal_preset_tier
         if config.optimal_preset_tier in {"low", "balanced", "high"}
