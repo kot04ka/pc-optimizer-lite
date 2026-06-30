@@ -3747,7 +3747,7 @@ def _qss(palette: dict[str, str]) -> str:
     QWidget {{
         background: {palette["bg"]};
         color: {palette["text"]};
-        font-family: "Segoe UI", Arial, sans-serif;
+        font-family: "Inter", "Segoe UI Variable", "Segoe UI", Arial, sans-serif;
         font-size: 13px;
     }}
     QLabel {{
@@ -3878,10 +3878,17 @@ def _qss(palette: dict[str, str]) -> str:
         margin-right: 4px;
         border-top-left-radius: 10px;
         border-top-right-radius: 10px;
+        font-weight: 500;
+    }}
+    QTabBar::tab:hover {{
+        color: {palette["text"]};
+        background: {_mix(QColor(palette["panel"]), QColor(palette["panel_2"]), 0.5).name()};
     }}
     QTabBar::tab:selected {{
         color: {palette["text"]};
         background: {palette["panel_2"]};
+        border-top: 2px solid {palette["accent"]};
+        font-weight: 650;
     }}
     QTableWidget, QListWidget {{
         background: {palette["panel"]};
@@ -3939,23 +3946,25 @@ def _qss(palette: dict[str, str]) -> str:
     }}
     QHeaderView::section {{
         background: {palette["panel_2"]};
-        color: {palette["text"]};
+        color: {palette["muted"]};
         border: none;
         border-bottom: 1px solid {palette["border"]};
         padding: 8px;
+        font-weight: 600;
+        font-size: 11px;
     }}
     QScrollBar:vertical {{
         background: transparent;
-        width: 8px;
+        width: 6px;
         margin: 4px 2px 4px 2px;
     }}
     QScrollBar::handle:vertical {{
-        background: {_with_alpha(palette["muted"], 120)};
-        border-radius: 4px;
+        background: {_with_alpha(palette["muted"], 100)};
+        border-radius: 3px;
         min-height: 28px;
     }}
     QScrollBar::handle:vertical:hover {{
-        background: {_with_alpha(palette["accent"], 170)};
+        background: {_with_alpha(palette["accent"], 160)};
     }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
     QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
@@ -3965,12 +3974,12 @@ def _qss(palette: dict[str, str]) -> str:
     }}
     QScrollBar:horizontal {{
         background: transparent;
-        height: 8px;
+        height: 6px;
         margin: 2px 4px 2px 4px;
     }}
     QScrollBar::handle:horizontal {{
-        background: {_with_alpha(palette["muted"], 120)};
-        border-radius: 4px;
+        background: {_with_alpha(palette["muted"], 100)};
+        border-radius: 3px;
         min-width: 28px;
     }}
     QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
@@ -4029,6 +4038,18 @@ def _qss(palette: dict[str, str]) -> str:
     }}
     QLineEdit:focus, QComboBox:focus {{
         border-color: {palette["accent"]};
+        background: {_mix(QColor(palette["input"]), QColor(palette["accent"]), 0.05).name()};
+    }}
+    QComboBox::drop-down {{
+        border: none;
+        width: 22px;
+    }}
+    QComboBox QAbstractItemView {{
+        background: {palette["panel_2"]};
+        border: 1px solid {palette["border"]};
+        selection-background-color: {_with_alpha(palette["accent"], 60)};
+        color: {palette["text"]};
+        padding: 2px;
     }}
     QLineEdit#SearchInput {{
         padding-left: 10px;
@@ -4090,12 +4111,15 @@ def _qss(palette: dict[str, str]) -> str:
         text-align: center;
     }}
     QProgressBar::chunk {{
-        background: {palette["accent"]};
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+            stop:0 {palette["accent"]},
+            stop:1 {_mix(QColor(palette["accent"]), QColor(palette["good"]), 0.5).name()});
         border-radius: 4px;
     }}
     QLabel#CardTitle {{
         color: {palette["muted"]};
         font-weight: 600;
+        font-size: 11px;
     }}
     QLabel#CardValue {{
         font-size: 26px;
@@ -4214,6 +4238,14 @@ def _qss(palette: dict[str, str]) -> str:
         padding: 0px;
         border-radius: 7px;
         font-weight: 800;
+    }}
+    QToolTip {{
+        background: {palette["panel_2"]};
+        color: {palette["text"]};
+        border: 1px solid {palette["border"]};
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 12px;
     }}
     """
 

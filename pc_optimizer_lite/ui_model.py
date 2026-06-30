@@ -57,20 +57,20 @@ TOPBAR_ACTIONS_LABEL = "Действия"
 
 
 PROMPT_DARK_TOKENS = DesignTokens(
-    background="#0B1017",
-    surface="#121A25",
-    surface_elevated="#182230",
-    surface_hover="#202C3B",
-    border="#27364A",
-    text_primary="#F3F7FC",
-    text_secondary="#9EB0C7",
-    text_muted="#6F8197",
-    accent_blue="#5B9CFF",
-    accent_blue_hover="#78AEFF",
-    success="#31D0A1",
-    warning="#F5B942",
-    danger="#F26B6B",
-    info="#67A8FF",
+    background="#0d0a16",
+    surface="#13102a",
+    surface_elevated="#1a1535",
+    surface_hover="#211840",
+    border="#231d3a",
+    text_primary="#ede8ff",
+    text_secondary="#7a6fa3",
+    text_muted="#5a5178",
+    accent_blue="#9b6dff",
+    accent_blue_hover="#b48fff",
+    success="#3ecf8e",
+    warning="#f6ab2f",
+    danger="#ff4d6a",
+    info="#9b6dff",
 )
 
 LIGHT_TOKENS = DesignTokens(
