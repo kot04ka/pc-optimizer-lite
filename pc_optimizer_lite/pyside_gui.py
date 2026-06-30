@@ -86,34 +86,34 @@ SLEEP_WAKE_POLL_MS = 500
 
 THEMES = {
     "dark": {
-        "bg": "#101318",
-        "panel": "#171b22",
-        "panel_2": "#1f2630",
-        "text": "#eef2f7",
-        "muted": "#9aa6b2",
-        "border": "#2b3440",
-        "accent": "#60a5fa",
-        "good": "#34d399",
-        "warn": "#fbbf24",
-        "bad": "#fb7185",
-        "input": "#0f141b",
-        "row": "#131821",
-        "row_alt": "#18202b",
+        "bg": "#0d0a16",
+        "panel": "#13102a",
+        "panel_2": "#1a1535",
+        "text": "#ede8ff",
+        "muted": "#7a6fa3",
+        "border": "#231d3a",
+        "accent": "#9b6dff",
+        "good": "#3ecf8e",
+        "warn": "#f6ab2f",
+        "bad": "#ff4d6a",
+        "input": "#080512",
+        "row": "#0f0d1e",
+        "row_alt": "#141030",
     },
     "light": {
-        "bg": "#f5f7fb",
+        "bg": "#eef2f7",
         "panel": "#ffffff",
-        "panel_2": "#eef2f7",
-        "text": "#111827",
-        "muted": "#667085",
-        "border": "#d7dde6",
+        "panel_2": "#e4eaf3",
+        "text": "#0f172a",
+        "muted": "#64748b",
+        "border": "#c8d4e0",
         "accent": "#2563eb",
         "good": "#059669",
         "warn": "#d97706",
         "bad": "#e11d48",
         "input": "#ffffff",
         "row": "#ffffff",
-        "row_alt": "#f1f5f9",
+        "row_alt": "#f4f7fa",
     },
 }
 
@@ -3266,7 +3266,7 @@ def _qss(palette: dict[str, str]) -> str:
     QWidget {{
         background: {palette["bg"]};
         color: {palette["text"]};
-        font-family: "Segoe UI", Arial, sans-serif;
+        font-family: "Inter", "Segoe UI Variable", "Segoe UI", Arial, sans-serif;
         font-size: 13px;
     }}
     QLabel {{
@@ -3287,10 +3287,17 @@ def _qss(palette: dict[str, str]) -> str:
         margin-right: 4px;
         border-top-left-radius: 10px;
         border-top-right-radius: 10px;
+        font-weight: 500;
+    }}
+    QTabBar::tab:hover {{
+        color: {palette["text"]};
+        background: {_mix(QColor(palette["panel"]), QColor(palette["panel_2"]), 0.5).name()};
     }}
     QTabBar::tab:selected {{
         color: {palette["text"]};
         background: {palette["panel_2"]};
+        border-top: 2px solid {palette["accent"]};
+        font-weight: 650;
     }}
     QTableWidget, QListWidget {{
         background: {palette["panel"]};
@@ -3325,28 +3332,30 @@ def _qss(palette: dict[str, str]) -> str:
     QTableWidget {{
         gridline-color: {palette["border"]};
         alternate-background-color: {palette["row_alt"]};
-        selection-background-color: {palette["accent"]};
+        selection-background-color: {_with_alpha(palette["accent"], 70)};
         padding: 0px;
     }}
     QHeaderView::section {{
         background: {palette["panel_2"]};
-        color: {palette["text"]};
+        color: {palette["muted"]};
         border: none;
         border-bottom: 1px solid {palette["border"]};
         padding: 8px;
+        font-weight: 600;
+        font-size: 11px;
     }}
     QScrollBar:vertical {{
         background: transparent;
-        width: 8px;
+        width: 6px;
         margin: 4px 2px 4px 2px;
     }}
     QScrollBar::handle:vertical {{
-        background: {_with_alpha(palette["muted"], 120)};
-        border-radius: 4px;
+        background: {_with_alpha(palette["muted"], 100)};
+        border-radius: 3px;
         min-height: 28px;
     }}
     QScrollBar::handle:vertical:hover {{
-        background: {_with_alpha(palette["accent"], 170)};
+        background: {_with_alpha(palette["accent"], 160)};
     }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
     QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
@@ -3356,12 +3365,12 @@ def _qss(palette: dict[str, str]) -> str:
     }}
     QScrollBar:horizontal {{
         background: transparent;
-        height: 8px;
+        height: 6px;
         margin: 2px 4px 2px 4px;
     }}
     QScrollBar::handle:horizontal {{
-        background: {_with_alpha(palette["muted"], 120)};
-        border-radius: 4px;
+        background: {_with_alpha(palette["muted"], 100)};
+        border-radius: 3px;
         min-width: 28px;
     }}
     QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
@@ -3379,7 +3388,7 @@ def _qss(palette: dict[str, str]) -> str:
     }}
     QPushButton:hover, QToolButton:hover {{
         border-color: {palette["accent"]};
-        background: {palette["input"]};
+        background: {_mix(QColor(palette["panel_2"]), QColor(palette["accent"]), 0.08).name()};
     }}
     QPushButton:pressed, QToolButton:pressed {{
         border-color: {_mix(QColor(palette["accent"]), QColor(palette["text"]), 0.28).name()};
@@ -3417,6 +3426,21 @@ def _qss(palette: dict[str, str]) -> str:
         border: 1px solid {palette["border"]};
         border-radius: 8px;
         padding: 7px;
+    }}
+    QLineEdit:focus, QComboBox:focus {{
+        border-color: {palette["accent"]};
+        background: {_mix(QColor(palette["input"]), QColor(palette["accent"]), 0.05).name()};
+    }}
+    QComboBox::drop-down {{
+        border: none;
+        width: 22px;
+    }}
+    QComboBox QAbstractItemView {{
+        background: {palette["panel_2"]};
+        border: 1px solid {palette["border"]};
+        selection-background-color: {_with_alpha(palette["accent"], 60)};
+        color: {palette["text"]};
+        padding: 2px;
     }}
     QLabel#FormLabel {{
         color: {palette["muted"]};
@@ -3474,12 +3498,15 @@ def _qss(palette: dict[str, str]) -> str:
         text-align: center;
     }}
     QProgressBar::chunk {{
-        background: {palette["accent"]};
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+            stop:0 {palette["accent"]},
+            stop:1 {_mix(QColor(palette["accent"]), QColor(palette["good"]), 0.5).name()});
         border-radius: 4px;
     }}
     QLabel#CardTitle {{
         color: {palette["muted"]};
         font-weight: 600;
+        font-size: 11px;
     }}
     QLabel#CardValue {{
         font-size: 26px;
@@ -3565,6 +3592,14 @@ def _qss(palette: dict[str, str]) -> str:
         padding: 0px;
         border-radius: 7px;
         font-weight: 800;
+    }}
+    QToolTip {{
+        background: {palette["panel_2"]};
+        color: {palette["text"]};
+        border: 1px solid {palette["border"]};
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 12px;
     }}
     """
 
