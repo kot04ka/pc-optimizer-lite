@@ -42,7 +42,52 @@ from pc_optimizer_lite.updater import (
     is_newer_version,
     is_repository_configured,
 )
+from pc_optimizer_lite.visual_effects import VISUAL_EFFECT_SETTINGS, VisualEffectSetting, VisualEffectsManager
 from pc_optimizer_lite.whitelist import Whitelist
+from pc_optimizer_lite.runtime_policy import sleep_wake_poll_policy
+from pc_optimizer_lite.ui_model import (
+    DEFAULT_NAV_PAGES,
+    PROMPT_DARK_TOKENS,
+    SETTINGS_LAYOUT,
+    TOPBAR_ACTIONS_LABEL,
+    build_design_palette,
+    evaluate_system_health,
+)
+
+
+class UiModelTests(unittest.TestCase):
+    def test_prompt_navigation_order_and_labels_are_stable(self) -> None:
+        self.assertEqual([page.page_id for page in DEFAULT_NAV_PAGES], ["overview", "processes", "activity", "exceptions", "settings"])
+        self.assertEqual([page.title for page in DEFAULT_NAV_PAGES], ["Обзор", "Процессы", "Активность", "Исключения", "Настройки"])
+        self.assertEqual(DEFAULT_NAV_PAGES[0].topbar_title, "Обзор системы")
+        self.assertEqual(DEFAULT_NAV_PAGES[1].topbar_title, "Процессы")
+
+    def test_prompt_dark_tokens_are_used_by_design_palette(self) -> None:
+        palette = build_design_palette("dark")
+
+        self.assertEqual(palette["bg"], PROMPT_DARK_TOKENS.background)
+        self.assertEqual(palette["panel"], PROMPT_DARK_TOKENS.surface)
+        self.assertEqual(palette["panel_2"], PROMPT_DARK_TOKENS.surface_elevated)
+        self.assertEqual(palette["panel_hover"], PROMPT_DARK_TOKENS.surface_hover)
+        self.assertEqual(palette["accent"], PROMPT_DARK_TOKENS.accent_blue)
+        self.assertEqual(palette["accent_hover"], PROMPT_DARK_TOKENS.accent_blue_hover)
+        self.assertEqual(palette["good"], PROMPT_DARK_TOKENS.success)
+
+    def test_system_health_status_warns_about_pressure(self) -> None:
+        good = evaluate_system_health(cpu_percent=22.0, ram_percent=42.0, disk_percent=54.0, swap_percent=2.0)
+        warning = evaluate_system_health(cpu_percent=42.0, ram_percent=72.0, disk_percent=83.0, swap_percent=11.0)
+        danger = evaluate_system_health(cpu_percent=94.0, ram_percent=91.0, disk_percent=88.0, swap_percent=76.0)
+
+        self.assertEqual(good.severity, "good")
+        self.assertEqual(warning.severity, "warn")
+        self.assertEqual(danger.severity, "bad")
+        self.assertIn("Нагрузка", danger.title)
+
+    def test_settings_layout_avoids_horizontal_overflow(self) -> None:
+        self.assertLessEqual(SETTINGS_LAYOUT.field_max_width, 360)
+        self.assertLessEqual(SETTINGS_LAYOUT.nav_width, 168)
+        self.assertEqual(SETTINGS_LAYOUT.min_content_width, 0)
+        self.assertEqual(TOPBAR_ACTIONS_LABEL, "Действия")
 
 
 class ConfigTests(unittest.TestCase):
@@ -149,6 +194,7 @@ class ConfigTests(unittest.TestCase):
         self.assertGreaterEqual(config.monitor_interval_seconds, 3.5)
         self.assertGreaterEqual(config.process_refresh_seconds, 12.0)
         self.assertLessEqual(config.cpu_optimizer_max_processes, 2)
+        self.assertTrue(config.visual_effects_low_power_enabled)
         self.assertEqual(config.auto_close_mode, "off")
 
     def test_auto_cleanup_settings_are_clamped(self) -> None:
@@ -1169,6 +1215,90 @@ class OneClickOptimizationTests(unittest.TestCase):
         plan = _classify_processes(config, [idle_low_resource, idle_heavy])
 
         self.assertEqual([item.pid for item in plan.sleep], [6002])
+
+    def test_visible_browser_keepalive_network_can_still_priority_sleep(self) -> None:
+        config = AppConfig(sleep_after_minutes=15.0)
+        browser = ProcessOptimizationSnapshot(
+            pid=6010,
+            name="chrome.exe",
+            exe=r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            username=r"PC\User",
+            cpu_percent=2.0,
+            memory_percent=4.0,
+            rss=400 * 1024 * 1024,
+            priority=None,
+            has_window=True,
+            is_foreground_related=False,
+            active_network=True,
+            active_audio_hint=False,
+            hung_window=False,
+            age_seconds=7200.0,
+            last_focus_age_seconds=3600.0,
+        )
+
+        plan = _classify_processes(config, [browser])
+
+        self.assertEqual(plan.sleep, [browser])
+
+
+class RuntimePolicyTests(unittest.TestCase):
+    def test_sleep_wake_poll_disabled_without_autopilot_or_sleeping_apps(self) -> None:
+        enabled, interval = sleep_wake_poll_policy(
+            AppConfig(observation_only_mode=True, sleep_enabled=False),
+            sleeping_count=0,
+            background=True,
+        )
+
+        self.assertFalse(enabled)
+        self.assertEqual(interval, 0)
+
+    def test_sleep_wake_poll_stays_on_for_sleeping_apps_in_background(self) -> None:
+        enabled, interval = sleep_wake_poll_policy(
+            AppConfig(observation_only_mode=True, sleep_enabled=False, lite_mode_enabled=True),
+            sleeping_count=1,
+            background=True,
+        )
+
+        self.assertTrue(enabled)
+        self.assertGreaterEqual(interval, 2500)
+
+
+class VisualEffectsTests(unittest.TestCase):
+    def test_low_power_effect_set_covers_common_windows_animations(self) -> None:
+        names = {setting.name for setting in VISUAL_EFFECT_SETTINGS}
+
+        self.assertGreaterEqual(len(names), 12)
+        self.assertIn("ui_effects", names)
+        self.assertIn("menu_fade", names)
+        self.assertIn("tooltip_fade", names)
+        self.assertIn("drop_shadow", names)
+
+    def test_visual_effects_manager_restores_captured_values(self) -> None:
+        class FakeAdapter:
+            available = True
+
+            def __init__(self) -> None:
+                self.values = {setting.name: True for setting in VISUAL_EFFECT_SETTINGS}
+                self.set_calls: list[tuple[str, bool]] = []
+
+            def get_bool(self, setting: VisualEffectSetting) -> bool | None:
+                return self.values[setting.name]
+
+            def set_bool(self, setting: VisualEffectSetting, enabled: bool) -> bool:
+                self.values[setting.name] = enabled
+                self.set_calls.append((setting.name, enabled))
+                return True
+
+        adapter = FakeAdapter()
+        manager = VisualEffectsManager(adapter)  # type: ignore[arg-type]
+
+        self.assertTrue(manager.apply_low_power())
+        self.assertTrue(manager.active)
+        self.assertTrue(all(value is False for value in adapter.values.values()))
+
+        self.assertTrue(manager.restore())
+        self.assertFalse(manager.active)
+        self.assertTrue(all(value is True for value in adapter.values.values()))
 
 
 class RamCleanerTests(unittest.TestCase):

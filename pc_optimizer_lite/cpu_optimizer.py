@@ -160,6 +160,7 @@ class CpuOptimizer:
             name=item.name,
             has_window=item.has_window,
             is_foreground_related=item.is_foreground_related,
+            check_current_foreground=False,
         ):
             return False
         if item.is_foreground_related or item.active_audio_hint or item.active_network:

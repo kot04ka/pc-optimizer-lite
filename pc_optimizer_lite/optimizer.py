@@ -130,6 +130,7 @@ class SystemOptimizer:
                 has_window=bool(getattr(process, "has_window", False)),
                 is_foreground_related=bool(getattr(process, "is_foreground_related", False)),
                 foreground_pid=foreground_pid,
+                check_current_foreground=foreground_pid is not None,
             )
             and (process.cpu_percent >= cpu_percent or process.memory_percent >= memory_percent)
         ]

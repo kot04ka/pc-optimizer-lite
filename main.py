@@ -46,7 +46,7 @@ def _run_tkinter_app(config) -> int:
         interval_seconds=config.monitor_interval_seconds,
         process_refresh_seconds=config.process_refresh_seconds,
     )
-    monitor.set_process_collection_enabled(True)
+    monitor.set_process_collection_enabled(False)
     optimizer = SystemOptimizer(whitelist)
     notifier = SystemNotifier(cooldown_seconds=config.notification_cooldown_seconds)
     app = PCOptimizerApp(root, config, monitor, whitelist, optimizer, notifier)

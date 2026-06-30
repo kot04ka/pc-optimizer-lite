@@ -11,7 +11,7 @@ pc_optimizer_lite/version.py
 Set:
 
 ```python
-APP_VERSION = "1.3.9"
+APP_VERSION = "1.5.1"
 ```
 
 Keep `pyproject.toml` in sync for package metadata.
@@ -41,8 +41,8 @@ The app is built as PyInstaller onedir only. The installer places that folder un
 Create a tag matching the version:
 
 ```powershell
-git tag v1.3.9
-git push origin v1.3.9
+git tag v1.5.1
+git push origin v1.5.1
 ```
 
 Then create a GitHub Release for that tag and attach these assets:
@@ -73,7 +73,7 @@ The updater selects the `PC-Optimizer-Lite-Setup.exe` asset and uses the release
 
 ## 4. Automatic Build From Tags
 
-The workflow in `.github/workflows/build.yml` builds and uploads release assets automatically when a tag like `v1.3.9` is pushed.
+The workflow in `.github/workflows/build.yml` builds and uploads release assets automatically when a tag like `v1.5.1` is pushed.
 
 The app checks:
 
