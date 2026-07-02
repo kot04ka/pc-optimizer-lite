@@ -1119,8 +1119,9 @@ class PCOptimizerQtWindow(QMainWindow):
             "Высокое использование (>70%) может говорить о нехватке физической памяти."
         )
         self.temp_card.set_info_tooltip(
-            "Показания датчика температуры CPU (если доступны в системе). "
-            "На части ПК с Windows датчик недоступен через стандартный интерфейс."
+            "Показания датчика температуры CPU через psutil, а на Windows дополнительно "
+            "через встроенный ACPI-датчик (если материнская плата его публикует). "
+            "На части ПК ни один из источников не доступен — это ограничение системы, не ошибка."
         )
         self.metric_cards = (self.cpu_card, self.temp_card, self.ram_card, self.disk_card, self.swap_card)
         layout.addLayout(self.card_grid)
