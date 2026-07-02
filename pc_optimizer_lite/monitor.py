@@ -10,6 +10,8 @@ from typing import Callable
 
 import psutil
 
+from .cpu_temperature import CpuTemperatureInfo, CpuTemperatureReader
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -83,6 +85,7 @@ class MonitorSnapshot:
     disks: list[DiskUsageInfo]
     disk_io: DiskIOInfo
     processes: list[ProcessInfo] = field(default_factory=list)
+    cpu_temperature: CpuTemperatureInfo | None = None
 
 
 SnapshotCallback = Callable[[MonitorSnapshot], None]
@@ -102,6 +105,12 @@ def format_bytes(value: int | float) -> str:
 
 class SystemMonitor:
     """Polls system metrics in a background thread."""
+
+    # interval_seconds is driven by lite/ultra-lite/background mode elsewhere
+    # (see pyside_gui._apply_runtime_performance_mode / _enter_background_mode);
+    # once it grows past this, treat temperature polling as "lite" too instead
+    # of tracking those modes independently.
+    LITE_TEMPERATURE_THRESHOLD_SECONDS = 8.0
 
     def __init__(
         self,
@@ -124,6 +133,7 @@ class SystemMonitor:
         self._last_snapshot: MonitorSnapshot | None = None
         self._lock = threading.Lock()
         self.process_collection_enabled = False
+        self._temperature_reader = CpuTemperatureReader()
 
         psutil.cpu_percent(interval=None)
         psutil.cpu_percent(interval=None, percpu=True)
@@ -229,6 +239,9 @@ class SystemMonitor:
             disks=disks,
             disk_io=self._collect_disk_io(),
             processes=processes,
+            cpu_temperature=self._temperature_reader.read(
+                lite_mode=self.interval_seconds >= self.LITE_TEMPERATURE_THRESHOLD_SECONDS
+            ),
         )
 
     def get_processes(self, max_processes: int = 150) -> list[ProcessInfo]:

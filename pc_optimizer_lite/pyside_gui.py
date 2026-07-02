@@ -1110,6 +1110,7 @@ class PCOptimizerQtWindow(QMainWindow):
         self.card_grid.setHorizontalSpacing(16)
         self.card_grid.setVerticalSpacing(16)
         self.cpu_card = MetricCard("CPU", "cpu", self.palette)
+        self.temp_card = MetricCard("Температура CPU", "thermometer", self.palette)
         self.ram_card = MetricCard("RAM", "memory", self.palette)
         self.disk_card = MetricCard("Диск", "hard-drive", self.palette)
         self.swap_card = MetricCard("Файл подкачки", "hard-drive", self.palette)
@@ -1117,7 +1118,11 @@ class PCOptimizerQtWindow(QMainWindow):
             "Файл подкачки — резервное расширение ОЗУ на диске. "
             "Высокое использование (>70%) может говорить о нехватке физической памяти."
         )
-        self.metric_cards = (self.cpu_card, self.ram_card, self.disk_card, self.swap_card)
+        self.temp_card.set_info_tooltip(
+            "Показания датчика температуры CPU (если доступны в системе). "
+            "На части ПК с Windows датчик недоступен через стандартный интерфейс."
+        )
+        self.metric_cards = (self.cpu_card, self.temp_card, self.ram_card, self.disk_card, self.swap_card)
         layout.addLayout(self.card_grid)
         self._arrange_metric_cards()
 
@@ -2090,7 +2095,7 @@ class PCOptimizerQtWindow(QMainWindow):
             self.health_admin_label.setText("Admin: да" if is_admin() else "Admin: нет")
         if hasattr(self, "topbar_menu_button"):
             self.topbar_menu_button.setIcon(_feather_icon("settings", self.palette["accent"]))
-        for card in (self.cpu_card, self.ram_card, self.disk_card, self.swap_card):
+        for card in self.metric_cards:
             card.set_palette(self.palette)
         self.graph.set_palette(self.palette)
         if hasattr(self, "save_settings_button"):
@@ -2125,6 +2130,15 @@ class PCOptimizerQtWindow(QMainWindow):
             if not self.config.graph_collapsed:
                 self.graph.queue_point(snapshot.cpu_percent, snapshot.memory.percent)
             self.cpu_card.set_metric(f"{snapshot.cpu_percent:.1f}%", f"{len(snapshot.per_core_cpu_percent)} ядер", snapshot.cpu_percent)
+            temperature = snapshot.cpu_temperature
+            if temperature and temperature.available and temperature.value is not None:
+                self.temp_card.set_metric(
+                    f"{temperature.value:.0f}°C",
+                    temperature.source or "",
+                    temperature.value,
+                )
+            else:
+                self.temp_card.set_metric("Н/Д", "Датчик недоступен", None)
             self.ram_card.set_metric(
                 f"{snapshot.memory.percent:.1f}%",
                 f"{format_bytes(snapshot.memory.used)} / {format_bytes(snapshot.memory.total)}",
@@ -2912,7 +2926,7 @@ class PCOptimizerQtWindow(QMainWindow):
             return
         over = (
             snapshot.cpu_percent >= self.config.cpu_threshold_percent
-            or snapshot.ram_percent >= self.config.ram_threshold_percent
+            or snapshot.memory.percent >= self.config.ram_threshold_percent
         )
         now = time.monotonic()
         if not over:
@@ -2934,12 +2948,12 @@ class PCOptimizerQtWindow(QMainWindow):
         if started:
             LOGGER.info(
                 "Threshold autopilot: CPU=%.0f%% RAM=%.0f%% sustained=%.0fs",
-                snapshot.cpu_percent, snapshot.ram_percent, sustained,
+                snapshot.cpu_percent, snapshot.memory.percent, sustained,
             )
             self.history.add_event(
                 "optimization",
                 "Автопилот: устойчивая нагрузка",
-                f"CPU {snapshot.cpu_percent:.0f}% / RAM {snapshot.ram_percent:.0f}% — тихая eco-оптимизация",
+                f"CPU {snapshot.cpu_percent:.0f}% / RAM {snapshot.memory.percent:.0f}% — тихая eco-оптимизация",
                 "info",
             )
 
