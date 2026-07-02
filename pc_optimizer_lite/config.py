@@ -12,6 +12,7 @@ from typing import Any
 import psutil
 
 from . import __app_name__
+from .background_load import AUTO_PAUSE_BACKGROUND_LOAD_IDS, BACKGROUND_LOAD_CONTROLS, SAFE_BACKGROUND_LOAD_PRESET
 
 MIN_MONITOR_INTERVAL_SECONDS = 2.0
 DEFAULT_CONFIG_FILENAME = "config.json"
@@ -19,7 +20,8 @@ DEFAULT_LOG_FILENAME = "pc_optimizer_lite.log"
 DEFAULT_GITHUB_OWNER = "kot04ka"
 DEFAULT_GITHUB_REPO = "pc-optimizer-lite"
 DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 4.0
-CONFIG_SCHEMA_VERSION = 9
+CONFIG_SCHEMA_VERSION = 10
+BACKGROUND_LOAD_CONTROL_IDS = {control.id for control in BACKGROUND_LOAD_CONTROLS}
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +49,15 @@ class AppConfig:
     visual_effects_preset: str = "custom"
     visual_effects_disabled_ids: list[str] = field(default_factory=list)
     visual_effects_auto_on_load: bool = False
+    background_load_control_enabled: bool = False
+    background_load_restore_on_exit: bool = True
+    background_load_auto_on_load: bool = False
+    background_load_disabled_ids: list[str] = field(default_factory=list)
+    background_load_auto_pause_enabled: bool = False
+    background_load_pause_cpu_threshold_percent: float = 85.0
+    background_load_pause_idle_seconds: float = 30.0
+    background_load_pause_cooldown_seconds: float = 180.0
+    ultra_lite_mode_enabled: bool = False
     cpu_threshold_percent: float = 85.0
     cpu_sustain_seconds: float = 2.8
     ram_threshold_percent: float = 85.0
@@ -165,6 +176,27 @@ def sanitize_config(config: AppConfig) -> AppConfig:
         s for s in config.visual_effects_disabled_ids if isinstance(s, str)
     ]
     config.visual_effects_auto_on_load = bool(config.visual_effects_auto_on_load)
+    config.background_load_control_enabled = bool(config.background_load_control_enabled)
+    config.background_load_restore_on_exit = bool(config.background_load_restore_on_exit)
+    config.background_load_auto_on_load = bool(config.background_load_auto_on_load)
+    if not isinstance(config.background_load_disabled_ids, list):
+        config.background_load_disabled_ids = []
+    config.background_load_disabled_ids = [
+        s
+        for s in config.background_load_disabled_ids
+        if isinstance(s, str) and s in BACKGROUND_LOAD_CONTROL_IDS
+    ]
+    config.background_load_auto_pause_enabled = bool(config.background_load_auto_pause_enabled)
+    config.background_load_pause_cpu_threshold_percent = min(
+        max(float(config.background_load_pause_cpu_threshold_percent), 50.0), 100.0
+    )
+    config.background_load_pause_idle_seconds = max(
+        10.0, float(config.background_load_pause_idle_seconds)
+    )
+    config.background_load_pause_cooldown_seconds = max(
+        60.0, float(config.background_load_pause_cooldown_seconds)
+    )
+    config.ultra_lite_mode_enabled = bool(config.ultra_lite_mode_enabled)
     config.optimal_preset_tier = (
         config.optimal_preset_tier
         if config.optimal_preset_tier in {"low", "balanced", "high"}
@@ -174,6 +206,10 @@ def sanitize_config(config: AppConfig) -> AppConfig:
     if config.lite_mode_enabled:
         config.monitor_interval_seconds = max(config.monitor_interval_seconds, 3.5)
         config.process_refresh_seconds = max(config.process_refresh_seconds, 12.0)
+    if config.ultra_lite_mode_enabled:
+        config.lite_mode_enabled = True
+        config.monitor_interval_seconds = max(config.monitor_interval_seconds, 10.0)
+        config.process_refresh_seconds = max(config.process_refresh_seconds, 30.0)
     config.cpu_threshold_percent = min(max(float(config.cpu_threshold_percent), 1.0), 100.0)
     config.cpu_sustain_seconds = max(0.5, float(config.cpu_sustain_seconds))
     config.ram_threshold_percent = min(max(float(config.ram_threshold_percent), 1.0), 100.0)
@@ -213,6 +249,8 @@ def sanitize_config(config: AppConfig) -> AppConfig:
     config.cpu_optimizer_max_processes = min(max(1, int(config.cpu_optimizer_max_processes)), 8)
     if config.lite_mode_enabled:
         config.cpu_optimizer_max_processes = min(config.cpu_optimizer_max_processes, 2)
+    if config.ultra_lite_mode_enabled:
+        config.cpu_optimizer_max_processes = min(config.cpu_optimizer_max_processes, 1)
     config.cpu_optimizer_affinity_ratio = min(max(float(config.cpu_optimizer_affinity_ratio), 0.25), 0.75)
     config.cpu_optimizer_affinity_min_cores = min(max(1, int(config.cpu_optimizer_affinity_min_cores)), 8)
     config.cpu_optimizer_restore_after_seconds = max(15.0, float(config.cpu_optimizer_restore_after_seconds))
@@ -341,6 +379,7 @@ def apply_optimal_preset(config: AppConfig, profile: HardwareProfile | None = No
     config.cleanup_recycle_bin_enabled = False
     config.cleanup_prefetch_enabled = False
     config.visual_effects_restore_on_exit = True
+    config.background_load_restore_on_exit = True
 
     config.cpu_threshold_percent = 85.0
     config.cpu_sustain_seconds = 3.0
@@ -353,7 +392,12 @@ def apply_optimal_preset(config: AppConfig, profile: HardwareProfile | None = No
 
     if tier == "low":
         config.lite_mode_enabled = True
+        config.ultra_lite_mode_enabled = True
         config.visual_effects_low_power_enabled = True
+        config.background_load_control_enabled = True
+        config.background_load_auto_on_load = True
+        config.background_load_auto_pause_enabled = True
+        config.background_load_disabled_ids = list(SAFE_BACKGROUND_LOAD_PRESET) + list(AUTO_PAUSE_BACKGROUND_LOAD_IDS)
         config.monitor_interval_seconds = 3.5
         config.process_refresh_seconds = 12.0
         config.cpu_optimizer_max_processes = 2
@@ -363,14 +407,22 @@ def apply_optimal_preset(config: AppConfig, profile: HardwareProfile | None = No
         config.periodic_optimization_interval_minutes = 20.0
     elif tier == "high":
         config.lite_mode_enabled = False
+        config.ultra_lite_mode_enabled = False
         config.visual_effects_low_power_enabled = False
+        config.background_load_control_enabled = False
+        config.background_load_auto_pause_enabled = False
+        config.background_load_disabled_ids = []
         config.monitor_interval_seconds = 2.5
         config.process_refresh_seconds = 6.0
         config.cpu_optimizer_max_processes = 4
         config.sleep_after_minutes = 12.0
     else:
         config.lite_mode_enabled = False
+        config.ultra_lite_mode_enabled = False
         config.visual_effects_low_power_enabled = False
+        config.background_load_control_enabled = False
+        config.background_load_auto_pause_enabled = False
+        config.background_load_disabled_ids = []
         config.monitor_interval_seconds = 3.0
         config.process_refresh_seconds = 6.0
         config.cpu_optimizer_max_processes = 3
@@ -482,6 +534,22 @@ def _migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
         migrated.setdefault("visual_effects_low_power_enabled", False)
         migrated.setdefault("visual_effects_restore_on_exit", True)
         migrated["config_version"] = 8
+    if version < 9:
+        migrated.setdefault("visual_effects_preset", "custom")
+        migrated.setdefault("visual_effects_disabled_ids", [])
+        migrated.setdefault("visual_effects_auto_on_load", False)
+        migrated["config_version"] = 9
+    if version < 10:
+        migrated.setdefault("background_load_control_enabled", False)
+        migrated.setdefault("background_load_restore_on_exit", True)
+        migrated.setdefault("background_load_auto_on_load", False)
+        migrated.setdefault("background_load_disabled_ids", [])
+        migrated.setdefault("background_load_auto_pause_enabled", False)
+        migrated.setdefault("background_load_pause_cpu_threshold_percent", 85.0)
+        migrated.setdefault("background_load_pause_idle_seconds", 30.0)
+        migrated.setdefault("background_load_pause_cooldown_seconds", 180.0)
+        migrated.setdefault("ultra_lite_mode_enabled", False)
+        migrated["config_version"] = 10
     return migrated
 
 

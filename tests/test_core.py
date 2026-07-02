@@ -11,6 +11,11 @@ from types import SimpleNamespace
 
 from pc_optimizer_lite import updater as updater_module
 from pc_optimizer_lite.autostart import get_launch_command
+from pc_optimizer_lite.background_load import (
+    AUTO_PAUSE_BACKGROUND_LOAD_IDS,
+    SAFE_BACKGROUND_LOAD_PRESET,
+    BackgroundLoadManager,
+)
 from pc_optimizer_lite.config import (
     AppConfig,
     HardwareProfile,
@@ -223,6 +228,57 @@ class ConfigTests(unittest.TestCase):
         self.assertGreaterEqual(config.monitor_interval_seconds, 3.5)
         self.assertGreaterEqual(config.process_refresh_seconds, 12.0)
         self.assertLessEqual(config.cpu_optimizer_max_processes, 2)
+
+    def test_ultra_lite_mode_uses_very_slow_polling(self) -> None:
+        config = sanitize_config(
+            AppConfig(
+                ultra_lite_mode_enabled=True,
+                monitor_interval_seconds=1.0,
+                process_refresh_seconds=2.0,
+                cpu_optimizer_max_processes=8,
+            )
+        )
+
+        self.assertGreaterEqual(config.monitor_interval_seconds, 10.0)
+        self.assertGreaterEqual(config.process_refresh_seconds, 30.0)
+        self.assertLessEqual(config.cpu_optimizer_max_processes, 1)
+
+    def test_background_load_settings_are_sanitized(self) -> None:
+        config = sanitize_config(
+            AppConfig(
+                background_load_control_enabled=True,
+                background_load_restore_on_exit=False,
+                background_load_auto_on_load=True,
+                background_load_disabled_ids=["windows_widgets", 42, "game_dvr"],
+                background_load_auto_pause_enabled=True,
+                background_load_pause_cpu_threshold_percent=250.0,
+                background_load_pause_idle_seconds=1.0,
+                background_load_pause_cooldown_seconds=5.0,
+            )
+        )
+
+        self.assertTrue(config.background_load_control_enabled)
+        self.assertFalse(config.background_load_restore_on_exit)
+        self.assertTrue(config.background_load_auto_on_load)
+        self.assertEqual(config.background_load_disabled_ids, ["windows_widgets", "game_dvr"])
+        self.assertTrue(config.background_load_auto_pause_enabled)
+        self.assertEqual(config.background_load_pause_cpu_threshold_percent, 100.0)
+        self.assertGreaterEqual(config.background_load_pause_idle_seconds, 10.0)
+        self.assertGreaterEqual(config.background_load_pause_cooldown_seconds, 60.0)
+
+    def test_optimal_low_end_preset_enables_background_load_relief(self) -> None:
+        config = apply_optimal_preset(
+            AppConfig(),
+            HardwareProfile(cpu_cores=2, ram_bytes=4 * 1024**3, disk_kind="hdd"),
+        )
+
+        self.assertTrue(config.background_load_control_enabled)
+        self.assertTrue(config.background_load_auto_pause_enabled)
+        self.assertTrue(config.ultra_lite_mode_enabled)
+        self.assertEqual(
+            set(config.background_load_disabled_ids),
+            set(SAFE_BACKGROUND_LOAD_PRESET) | set(AUTO_PAUSE_BACKGROUND_LOAD_IDS),
+        )
 
     def test_autostart_command_uses_tray_flag(self) -> None:
         self.assertIn("--tray", get_launch_command())
@@ -1301,6 +1357,106 @@ class VisualEffectsTests(unittest.TestCase):
         self.assertTrue(all(value is True for value in adapter.values.values()))
 
 
+class BackgroundLoadTests(unittest.TestCase):
+    def test_manager_restores_captured_registry_values(self) -> None:
+        adapter = _FakeBackgroundLoadAdapter(
+            registry_values={
+                "windows_widgets": 1,
+                "windows_news": 0,
+                "xbox_game_bar": 1,
+                "game_dvr": 1,
+                "game_recording": 1,
+            }
+        )
+        manager = BackgroundLoadManager(adapter)
+
+        count = manager.apply_disabled_set(SAFE_BACKGROUND_LOAD_PRESET)
+
+        self.assertEqual(count, len(SAFE_BACKGROUND_LOAD_PRESET))
+        self.assertTrue(manager.active)
+        for control_id in SAFE_BACKGROUND_LOAD_PRESET:
+            self.assertEqual(adapter.registry_values[control_id], 0 if control_id != "windows_news" else 2)
+
+        self.assertTrue(manager.restore())
+        self.assertFalse(manager.active)
+        self.assertEqual(adapter.registry_values["windows_widgets"], 1)
+        self.assertEqual(adapter.registry_values["windows_news"], 0)
+        self.assertEqual(adapter.registry_values["xbox_game_bar"], 1)
+        self.assertEqual(adapter.registry_values["game_dvr"], 1)
+        self.assertEqual(adapter.registry_values["game_recording"], 1)
+
+    def test_manager_deletes_registry_values_that_were_missing_before_apply(self) -> None:
+        adapter = _FakeBackgroundLoadAdapter(registry_values={})
+        manager = BackgroundLoadManager(adapter)
+
+        manager.apply_disabled_set({"windows_widgets"})
+        self.assertEqual(adapter.registry_values["windows_widgets"], 0)
+
+        self.assertTrue(manager.restore())
+        self.assertNotIn("windows_widgets", adapter.registry_values)
+
+    def test_auto_pause_pauses_and_resumes_services_only_when_high_load_and_idle(self) -> None:
+        adapter = _FakeBackgroundLoadAdapter(registry_values={})
+        manager = BackgroundLoadManager(adapter)
+
+        low_actions = manager.update_auto_pause(
+            AUTO_PAUSE_BACKGROUND_LOAD_IDS,
+            cpu_percent=50.0,
+            idle_seconds=60.0,
+            threshold_percent=80.0,
+            required_idle_seconds=30.0,
+        )
+        self.assertEqual(low_actions, [])
+        self.assertFalse(adapter.paused_services)
+
+        pause_actions = manager.update_auto_pause(
+            AUTO_PAUSE_BACKGROUND_LOAD_IDS,
+            cpu_percent=91.0,
+            idle_seconds=45.0,
+            threshold_percent=80.0,
+            required_idle_seconds=30.0,
+        )
+        self.assertEqual(pause_actions, ["paused:WSearch", "paused:DoSvc"])
+        self.assertEqual(adapter.paused_services, {"WSearch", "DoSvc"})
+
+        resume_actions = manager.update_auto_pause(
+            AUTO_PAUSE_BACKGROUND_LOAD_IDS,
+            cpu_percent=25.0,
+            idle_seconds=45.0,
+            threshold_percent=80.0,
+            required_idle_seconds=30.0,
+        )
+        self.assertEqual(resume_actions, ["resumed:WSearch", "resumed:DoSvc"])
+        self.assertFalse(adapter.paused_services)
+
+
+class _FakeBackgroundLoadAdapter:
+    available = True
+
+    def __init__(self, registry_values: dict[str, int | None]) -> None:
+        self.registry_values = dict(registry_values)
+        self.paused_services: set[str] = set()
+
+    def read_registry_value(self, control) -> int | None:
+        return self.registry_values.get(control.id)
+
+    def write_registry_value(self, control, value: int) -> bool:
+        self.registry_values[control.id] = value
+        return True
+
+    def delete_registry_value(self, control) -> bool:
+        self.registry_values.pop(control.id, None)
+        return True
+
+    def pause_service(self, service_name: str) -> bool:
+        self.paused_services.add(service_name)
+        return True
+
+    def resume_service(self, service_name: str) -> bool:
+        self.paused_services.discard(service_name)
+        return True
+
+
 class RamCleanerTests(unittest.TestCase):
     def test_ram_clean_result_freed_bytes(self) -> None:
         result = RamCleanResult(
@@ -1389,6 +1545,69 @@ class AutoOptimizationTriggerTests(unittest.TestCase):
 
         self.assertEqual(marks, ["Limited worker.exe"])
         self.assertEqual(refreshes, ["refresh"])
+
+    def test_background_load_auto_pause_runs_when_high_cpu_and_idle(self) -> None:
+        from pc_optimizer_lite.pyside_gui import PCOptimizerQtWindow
+
+        calls: list[dict[str, object]] = []
+        events: list[tuple[str, str, str, str]] = []
+        window = SimpleNamespace(
+            config=AppConfig(
+                observation_only_mode=False,
+                background_load_control_enabled=True,
+                background_load_auto_pause_enabled=True,
+                background_load_disabled_ids=list(AUTO_PAUSE_BACKGROUND_LOAD_IDS),
+                background_load_pause_cpu_threshold_percent=80.0,
+                background_load_pause_idle_seconds=30.0,
+                background_load_pause_cooldown_seconds=60.0,
+            ),
+            _last_background_load_pause_at=-10_000.0,
+            background_load=SimpleNamespace(
+                update_auto_pause=lambda enabled_ids, **kwargs: calls.append(
+                    {"enabled_ids": tuple(enabled_ids), **kwargs}
+                )
+                or ["paused:WSearch", "paused:DoSvc"]
+            ),
+            history=SimpleNamespace(add_event=lambda *args: events.append(args)),
+            refresh_activity=lambda: None,
+        )
+
+        PCOptimizerQtWindow._maybe_background_load_pause(window, self._snapshot(cpu=92.0), idle_seconds=45.0)  # type: ignore[arg-type]
+
+        self.assertEqual(calls[0]["enabled_ids"], AUTO_PAUSE_BACKGROUND_LOAD_IDS)
+        self.assertEqual(calls[0]["cpu_percent"], 92.0)
+        self.assertEqual(calls[0]["idle_seconds"], 45.0)
+        self.assertGreater(window._last_background_load_pause_at, 0.0)
+        self.assertEqual(events[0][1], "Фоновая нагрузка Windows снижена")
+        self.assertIn("WSearch", events[0][2])
+
+    def test_ultra_lite_runtime_uses_slowest_foreground_intervals(self) -> None:
+        from pc_optimizer_lite.pyside_gui import PCOptimizerQtWindow
+
+        graph_modes: list[bool] = []
+        activity_intervals: list[int] = []
+        window = SimpleNamespace(
+            config=AppConfig(
+                lite_mode_enabled=True,
+                ultra_lite_mode_enabled=True,
+                monitor_interval_seconds=3.0,
+                process_refresh_seconds=6.0,
+            ),
+            graph=SimpleNamespace(set_lite_mode=lambda enabled: graph_modes.append(enabled)),
+            activity_timer=SimpleNamespace(setInterval=lambda value: activity_intervals.append(value)),
+            isVisible=lambda: False,
+            isMinimized=lambda: False,
+            _apply_visual_effects_mode=lambda: None,
+            _apply_background_load_mode=lambda: None,
+            _sync_sleep_wake_timer=lambda: None,
+        )
+
+        PCOptimizerQtWindow._apply_runtime_performance_mode(window)  # type: ignore[arg-type]
+
+        self.assertEqual(graph_modes, [True])
+        self.assertGreaterEqual(window._foreground_monitor_interval, 10.0)
+        self.assertGreaterEqual(window._foreground_process_interval, 30.0)
+        self.assertEqual(activity_intervals, [45000])
 
     def test_cpu_threshold_starts_quiet_eco_optimization_when_idle(self) -> None:
         from pc_optimizer_lite.pyside_gui import PCOptimizerQtWindow

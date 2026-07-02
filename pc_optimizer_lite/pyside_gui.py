@@ -45,6 +45,12 @@ from PySide6.QtWidgets import (
 )
 
 from .autostart import disable_autostart, enable_autostart, is_autostart_enabled
+from .background_load import (
+    AUTO_PAUSE_BACKGROUND_LOAD_IDS,
+    BACKGROUND_LOAD_CONTROLS,
+    BackgroundLoadManager,
+    SAFE_BACKGROUND_LOAD_PRESET,
+)
 from .config import (
     DEFAULT_GITHUB_OWNER,
     DEFAULT_GITHUB_REPO,
@@ -84,6 +90,37 @@ LOGGER = logging.getLogger(__name__)
 STARTUP_MONITOR_DELAY_MS = 1200
 STARTUP_LITE_PROMPT_DELAY_MS = 2500
 STARTUP_UPDATE_CHECK_DELAY_MS = 8000
+
+BACKGROUND_LOAD_UI_TEXT: dict[str, tuple[str, str]] = {
+    "windows_widgets": (
+        "Отключать Widgets Windows",
+        "Скрывает Widgets на панели задач Windows 11 через HKCU и сохраняет исходное значение для отката.",
+    ),
+    "windows_news": (
+        "Отключать Новости и интересы",
+        "Скрывает ленту новостей на панели задач Windows 10 без отключения Windows Update.",
+    ),
+    "xbox_game_bar": (
+        "Отключать Xbox Game Bar",
+        "Отключает shell-интеграцию Game Bar для меньшего числа фоновых overlay-хуков.",
+    ),
+    "game_dvr": (
+        "Отключать Game DVR",
+        "Отключает захват игр Windows Game DVR для текущего пользователя.",
+    ),
+    "game_recording": (
+        "Отключать фоновую запись игр",
+        "Отключает background recording/capture, который может держать фоновые службы и overlay.",
+    ),
+    "search_indexing": (
+        "Пауза Windows Search при высокой CPU",
+        "Временно ставит WSearch на паузу только при высокой нагрузке и простое пользователя; потом возвращает.",
+    ),
+    "delivery_optimization": (
+        "Пауза Delivery Optimization при высокой CPU",
+        "Временно останавливает фоновые delivery-загрузки при высокой нагрузке и простое пользователя; потом возвращает.",
+    ),
+}
 
 
 THEMES = {
@@ -678,6 +715,7 @@ class PCOptimizerQtWindow(QMainWindow):
         self.cpu_optimizer = cpu_optimizer
         self.cpu_throttler = cpu_throttler
         self.visual_effects = VisualEffectsManager()
+        self.background_load = BackgroundLoadManager()
         self.palette = THEMES[self.config.theme]
         self.bridge = SnapshotBridge()
         self.bridge.snapshot_received.connect(self._render_snapshot)
@@ -694,6 +732,7 @@ class PCOptimizerQtWindow(QMainWindow):
         self._last_periodic_optimization_at = time.monotonic()
         self._last_scheduled_cleanup_at = time.monotonic()
         self._last_auto_ram_clean_at = 0.0
+        self._last_background_load_pause_at = 0.0
         self._threshold_over_since: float | None = None
         self._last_threshold_autopilot_at: float = 0.0
         self._last_threshold_cpu_optimization_at = 0.0
@@ -1353,6 +1392,12 @@ class PCOptimizerQtWindow(QMainWindow):
             "Увеличивает интервалы опроса, упрощает график и по умолчанию отключает тяжёлые действия."
         )
         self.lite_mode_check.toggled.connect(lambda enabled: self._preview_lite_mode_defaults(enabled))
+        self.ultra_lite_check = _toggle("Ultra-lite режим программы")
+        self.ultra_lite_check.setChecked(self.config.ultra_lite_mode_enabled)
+        self.ultra_lite_check.setToolTip(
+            "Максимально редкий опрос: реже обновляет график/процессы и снижает собственную нагрузку программы."
+        )
+        self.ultra_lite_check.toggled.connect(lambda enabled: self._preview_ultra_lite_defaults(enabled))
         self.interval_edit = QLineEdit(str(self.config.monitor_interval_seconds))
         self.process_interval_edit = QLineEdit(str(self.config.process_refresh_seconds))
         self.cpu_threshold_edit = QLineEdit(str(self.config.cpu_threshold_percent))
@@ -1392,6 +1437,37 @@ class PCOptimizerQtWindow(QMainWindow):
         self.vfx_apply_btn = _button("Применить сейчас", "check", self._apply_vfx_now, self.palette)
         self.vfx_restore_btn = _button("Восстановить исходные", "refresh", self._restore_vfx, self.palette)
         self._refresh_vfx_checkboxes()
+
+        self.background_load_check = _toggle("Снижать фоновые функции Windows")
+        self.background_load_check.setChecked(self.config.background_load_control_enabled)
+        self.background_load_check.setToolTip(
+            "Отключает выбранные пользовательские функции Windows и сохраняет исходные значения для восстановления."
+        )
+        self.background_load_auto_on_load_check = _toggle("Применять фоновые настройки при запуске")
+        self.background_load_auto_on_load_check.setChecked(self.config.background_load_auto_on_load)
+        self.background_load_auto_on_load_check.setToolTip(
+            "Автоматически применяет выбранные фоновые ограничения при старте PC Optimizer Lite."
+        )
+        self.background_load_auto_pause_check = _toggle("Пауза Search/Delivery при высокой нагрузке")
+        self.background_load_auto_pause_check.setChecked(self.config.background_load_auto_pause_enabled)
+        self.background_load_auto_pause_check.setToolTip(
+            "При высокой CPU-нагрузке и простое пользователя временно ставит WSearch/DoSvc на паузу и возвращает позже."
+        )
+        self.background_load_cpu_threshold_edit = QLineEdit(str(self.config.background_load_pause_cpu_threshold_percent))
+        self.background_load_idle_edit = QLineEdit(str(self.config.background_load_pause_idle_seconds))
+        self.background_load_cooldown_edit = QLineEdit(str(self.config.background_load_pause_cooldown_seconds))
+        self.background_load_cpu_threshold_edit.setToolTip("CPU-порог для временной паузы Search/Delivery Optimization.")
+        self.background_load_idle_edit.setToolTip("Сколько секунд не должно быть ввода мыши/клавиатуры перед паузой служб.")
+        self.background_load_cooldown_edit.setToolTip("Минимальная пауза между автоматическими service pause/resume действиями.")
+        self.background_load_control_checks: dict[str, QCheckBox] = {}
+        for control in BACKGROUND_LOAD_CONTROLS:
+            label, tooltip = BACKGROUND_LOAD_UI_TEXT.get(control.id, (control.label, control.description))
+            cb = _toggle(label)
+            cb.setToolTip(tooltip)
+            self.background_load_control_checks[control.id] = cb
+        self.background_load_apply_btn = _button("Применить сейчас", "check", self._apply_background_load_now, self.palette)
+        self.background_load_restore_btn = _button("Восстановить исходные", "refresh", self._restore_background_load, self.palette)
+        self._refresh_background_load_checkboxes()
 
         self.auto_close_combo = QComboBox()
         self.auto_close_combo.addItem("Выключено", "off")
@@ -1515,6 +1591,7 @@ class PCOptimizerQtWindow(QMainWindow):
         _form_row(monitoring_form, "", self.observation_only_check)
         _form_row(monitoring_form, "", self.autostart_check)
         _form_row(monitoring_form, "", self.lite_mode_check)
+        _form_row(monitoring_form, "", self.ultra_lite_check)
         _form_row(monitoring_form, "", self.visual_effects_check)
         _form_row(monitoring_form, "", self.reset_optimal_button)
         _form_row(monitoring_form, "Интервал мониторинга, сек", self.interval_edit)
@@ -1567,6 +1644,30 @@ class PCOptimizerQtWindow(QMainWindow):
         hint.setObjectName("SettingsHint")
         cpu_form.addRow(hint)
         content_layout.addWidget(cpu_section)
+
+        background_section, background_form = _settings_section("Фоновая нагрузка Windows", self.palette)
+        _form_row(background_form, "", self.background_load_check)
+        _form_row(background_form, "", self.background_load_auto_on_load_check)
+        _form_row(background_form, "", self.background_load_auto_pause_check)
+        _form_row(background_form, "CPU-порог паузы, %", self.background_load_cpu_threshold_edit)
+        _form_row(background_form, "Простой пользователя, сек", self.background_load_idle_edit)
+        _form_row(background_form, "Кулдаун паузы, сек", self.background_load_cooldown_edit)
+        for cb in self.background_load_control_checks.values():
+            _form_row(background_form, "", cb)
+        background_action_row = QHBoxLayout()
+        background_action_row.setSpacing(8)
+        background_action_row.addWidget(self.background_load_apply_btn)
+        background_action_row.addWidget(self.background_load_restore_btn)
+        background_action_row.addStretch()
+        background_form.addRow(background_action_row)
+        background_hint = QLabel(
+            "Widgets, News, Game Bar и Game DVR меняются для текущего пользователя. "
+            "Windows Search и Delivery Optimization не отключаются навсегда: программа только временно ставит их на паузу при нагрузке."
+        )
+        background_hint.setObjectName("SettingsHint")
+        background_hint.setWordWrap(True)
+        background_form.addRow(background_hint)
+        content_layout.addWidget(background_section)
 
         cleanup_section, cleanup_form = _settings_section("Автоматическая очистка", self.palette)
         _form_row(cleanup_form, "", self.scheduled_cleanup_check)
@@ -1639,8 +1740,10 @@ class PCOptimizerQtWindow(QMainWindow):
             ("Сон", sleep_section),
             ("RAM", ram_section),
             ("CPU", cpu_section),
+            ("Фон", background_section),
             ("Очистка", cleanup_section),
             ("Автопилот", periodic_section),
+            ("Визуал", vfx_section),
             ("Шаги", steps_section),
             ("Обновления", updates_section),
         ):
@@ -1704,6 +1807,9 @@ class PCOptimizerQtWindow(QMainWindow):
             self.cpu_optimizer_affinity_ratio_edit,
             self.cpu_optimizer_min_cores_edit,
             self.cpu_optimizer_restore_edit,
+            self.background_load_cpu_threshold_edit,
+            self.background_load_idle_edit,
+            self.background_load_cooldown_edit,
             self.scheduled_cleanup_interval_edit,
             self.auto_cleanup_cooldown_edit,
             self.cleanup_logs_days_edit,
@@ -1713,7 +1819,12 @@ class PCOptimizerQtWindow(QMainWindow):
             widget.setMaximumWidth(SETTINGS_LAYOUT.field_max_width)
             widget.setMinimumWidth(180)
             widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        for button in (self.reset_optimal_button, self.check_updates_button):
+        for button in (
+            self.reset_optimal_button,
+            self.background_load_apply_btn,
+            self.background_load_restore_btn,
+            self.check_updates_button,
+        ):
             button.setMaximumWidth(SETTINGS_LAYOUT.field_max_width)
             button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         for button in (self.import_settings_button, self.export_settings_button, self.save_settings_button):
@@ -1798,6 +1909,21 @@ class PCOptimizerQtWindow(QMainWindow):
             if checkbox is not None:
                 checkbox.setChecked(False)
 
+    def _preview_ultra_lite_defaults(self, enabled: bool) -> None:
+        if not enabled or self._syncing_controls:
+            return
+        self.lite_mode_check.setChecked(True)
+        self.interval_edit.setText(str(max(_safe_float(self.interval_edit.text(), 3.0), 10.0)))
+        self.process_interval_edit.setText(str(max(_safe_float(self.process_interval_edit.text(), 6.0), 30.0)))
+        self.cpu_optimizer_max_edit.setText("1")
+        self.cpu_throttle_check.setChecked(False)
+        self.cpu_limiter_check.setChecked(False)
+        self.auto_close_combo.setCurrentIndex(0)
+        for key in ("sleep", "close", "cleanup"):
+            checkbox = self.optimization_step_checks.get(key)
+            if checkbox is not None:
+                checkbox.setChecked(False)
+
     def reset_to_optimal_settings(self) -> None:
         answer = QMessageBox.question(
             self,
@@ -1838,6 +1964,9 @@ class PCOptimizerQtWindow(QMainWindow):
         for field_name in AppConfig.__dataclass_fields__:
             setattr(self.config, field_name, getattr(source, field_name))
 
+    def _save_config(self) -> None:
+        save_config(self.config)
+
     def _apply_config_runtime(self) -> None:
         self.notifier.cooldown_seconds = self.config.notification_cooldown_seconds
         self.monitor.interval_seconds = self.config.monitor_interval_seconds
@@ -1848,6 +1977,7 @@ class PCOptimizerQtWindow(QMainWindow):
         if not self.isVisible() or self.isMinimized():
             self._enter_background_mode()
         self._apply_visual_effects_mode()
+        self._apply_background_load_mode()
         self._sync_sleep_wake_timer()
         self._refresh_tray_state()
 
@@ -1865,9 +1995,17 @@ class PCOptimizerQtWindow(QMainWindow):
             self.ram_threshold_edit.setText(str(self.config.ram_threshold_percent))
             self.cooldown_edit.setText(str(self.config.notification_cooldown_seconds))
             self.lite_mode_check.setChecked(self.config.lite_mode_enabled)
+            self.ultra_lite_check.setChecked(self.config.ultra_lite_mode_enabled)
             self.visual_effects_check.setChecked(self.config.visual_effects_low_power_enabled)
             self.vfx_auto_on_load_check.setChecked(self.config.visual_effects_auto_on_load)
             self._refresh_vfx_checkboxes()
+            self.background_load_check.setChecked(self.config.background_load_control_enabled)
+            self.background_load_auto_on_load_check.setChecked(self.config.background_load_auto_on_load)
+            self.background_load_auto_pause_check.setChecked(self.config.background_load_auto_pause_enabled)
+            self.background_load_cpu_threshold_edit.setText(str(self.config.background_load_pause_cpu_threshold_percent))
+            self.background_load_idle_edit.setText(str(self.config.background_load_pause_idle_seconds))
+            self.background_load_cooldown_edit.setText(str(self.config.background_load_pause_cooldown_seconds))
+            self._refresh_background_load_checkboxes()
             self.interval_edit.setText(str(self.config.monitor_interval_seconds))
             self.process_interval_edit.setText(str(self.config.process_refresh_seconds))
             self.auto_close_combo.setCurrentIndex({"off": 0, "ask": 1, "auto": 2}.get(self.config.auto_close_mode, 0))
@@ -2023,6 +2161,7 @@ class PCOptimizerQtWindow(QMainWindow):
                 self.refresh_activity()
             self._maybe_poll_sleep_manager()
             self._maybe_cpu_throttle(snapshot)
+            self._maybe_background_load_pause(snapshot)
             self._maybe_auto_ram_clean(snapshot)
             self._maybe_smart_close(snapshot)
             self._maybe_scheduled_auto_cleanup(snapshot)
@@ -2614,6 +2753,48 @@ class PCOptimizerQtWindow(QMainWindow):
                     self.graph.mark_intervention(action.detail)
             self.refresh_activity()
 
+    def _maybe_background_load_pause(self, snapshot: MonitorSnapshot, *, idle_seconds: float | None = None) -> None:
+        if (
+            self.config.observation_only_mode
+            or not self.config.background_load_control_enabled
+            or not self.config.background_load_auto_pause_enabled
+        ):
+            return
+        enabled_ids = tuple(
+            control_id
+            for control_id in AUTO_PAUSE_BACKGROUND_LOAD_IDS
+            if control_id in set(self.config.background_load_disabled_ids)
+        )
+        if not enabled_ids:
+            return
+        idle = _seconds_since_last_input() if idle_seconds is None else idle_seconds
+        should_pause = (
+            snapshot.cpu_percent >= self.config.background_load_pause_cpu_threshold_percent
+            and idle >= self.config.background_load_pause_idle_seconds
+        )
+        now = time.monotonic()
+        if should_pause and now - self._last_background_load_pause_at < self.config.background_load_pause_cooldown_seconds:
+            return
+        actions = self.background_load.update_auto_pause(
+            enabled_ids,
+            cpu_percent=snapshot.cpu_percent,
+            idle_seconds=idle,
+            threshold_percent=self.config.background_load_pause_cpu_threshold_percent,
+            required_idle_seconds=self.config.background_load_pause_idle_seconds,
+        )
+        if not actions:
+            return
+        if any(action.startswith("paused:") for action in actions):
+            self._last_background_load_pause_at = now
+            title = "Фоновая нагрузка Windows снижена"
+            severity = "info"
+        else:
+            title = "Фоновая нагрузка Windows восстановлена"
+            severity = "success"
+        detail = ", ".join(action.split(":", 1)[1] for action in actions)
+        self.history.add_event("settings", title, detail, severity)
+        self.refresh_activity()
+
     def _maybe_smart_close(self, snapshot: MonitorSnapshot) -> None:
         if self.config.observation_only_mode or self.config.auto_close_mode == "off" or not snapshot.processes:
             return
@@ -2688,6 +2869,40 @@ class PCOptimizerQtWindow(QMainWindow):
         self.config.visual_effects_disabled_ids = []
         self.config.visual_effects_preset = "custom"
         self._refresh_vfx_checkboxes()
+        self._save_config()
+
+    def _refresh_background_load_checkboxes(self) -> None:
+        disabled = set(self.config.background_load_disabled_ids)
+        for control_id, cb in self.background_load_control_checks.items():
+            cb.blockSignals(True)
+            cb.setChecked(control_id in disabled)
+            cb.blockSignals(False)
+
+    def _apply_background_load_now(self) -> None:
+        disabled = {control_id for control_id, cb in self.background_load_control_checks.items() if cb.isChecked()}
+        self.config.background_load_control_enabled = True
+        self.config.background_load_disabled_ids = list(disabled)
+        self.background_load_check.setChecked(True)
+        self._refresh_background_load_checkboxes()
+        count = self.background_load.apply_disabled_set(disabled)
+        self.history.add_event(
+            "settings",
+            f"Фоновая нагрузка Windows: {count} отключено",
+            "Применены выбранные HKCU-настройки Widgets/Game Bar/DVR.",
+            "info",
+        )
+        self._save_config()
+
+    def _restore_background_load(self) -> None:
+        if self.background_load.restore():
+            self.history.add_event(
+                "settings",
+                "Фоновая нагрузка Windows восстановлена",
+                "Возвращены исходные настройки Widgets/Game Bar/DVR и временно остановленные службы.",
+                "info",
+            )
+        self.config.background_load_disabled_ids = []
+        self._refresh_background_load_checkboxes()
         self._save_config()
 
     def _maybe_threshold_autopilot(self, snapshot: MonitorSnapshot) -> None:
@@ -3192,6 +3407,8 @@ class PCOptimizerQtWindow(QMainWindow):
         save_config(self.config)
         self._sync_controls_from_config()
         self._apply_config_runtime()
+        if not self.config.background_load_auto_on_load:
+            self._apply_background_load_mode(force=True)
         self.apply_theme()
         self.refresh_whitelist_lists()
         self.history.add_event("settings", "Settings imported", f"Imported from {source}", "success")
@@ -3209,11 +3426,21 @@ class PCOptimizerQtWindow(QMainWindow):
                 return False
             self.config.observation_only_mode = self.observation_only_check.isChecked()
             self.config.lite_mode_enabled = self.lite_mode_check.isChecked()
+            self.config.ultra_lite_mode_enabled = self.ultra_lite_check.isChecked()
             self.config.visual_effects_low_power_enabled = self.visual_effects_check.isChecked()
             self.config.visual_effects_auto_on_load = self.vfx_auto_on_load_check.isChecked()
             disabled = {eid for eid, cb in self.vfx_effect_checks.items() if not cb.isChecked()}
             self.config.visual_effects_disabled_ids = list(disabled)
             self.config.visual_effects_preset = _detect_vfx_preset(disabled)
+            self.config.background_load_control_enabled = self.background_load_check.isChecked()
+            self.config.background_load_auto_on_load = self.background_load_auto_on_load_check.isChecked()
+            self.config.background_load_auto_pause_enabled = self.background_load_auto_pause_check.isChecked()
+            self.config.background_load_disabled_ids = [
+                control_id for control_id, cb in self.background_load_control_checks.items() if cb.isChecked()
+            ]
+            self.config.background_load_pause_cpu_threshold_percent = float(self.background_load_cpu_threshold_edit.text())
+            self.config.background_load_pause_idle_seconds = float(self.background_load_idle_edit.text())
+            self.config.background_load_pause_cooldown_seconds = float(self.background_load_cooldown_edit.text())
             self.config.monitor_interval_seconds = float(self.interval_edit.text())
             self.config.process_refresh_seconds = float(self.process_interval_edit.text())
             self.config.cpu_threshold_percent = float(self.cpu_threshold_edit.text())
@@ -3524,21 +3751,25 @@ class PCOptimizerQtWindow(QMainWindow):
         self._enter_foreground_mode()
 
     def _apply_runtime_performance_mode(self) -> None:
-        self.graph.set_lite_mode(self.config.lite_mode_enabled)
+        lite_like = self.config.lite_mode_enabled or self.config.ultra_lite_mode_enabled
+        self.graph.set_lite_mode(lite_like)
         self._foreground_monitor_interval = max(
-            3.5 if self.config.lite_mode_enabled else 2.0,
+            10.0 if self.config.ultra_lite_mode_enabled else 3.5 if self.config.lite_mode_enabled else 2.0,
             self.config.monitor_interval_seconds,
         )
         self._foreground_process_interval = max(
             self._foreground_monitor_interval,
-            12.0 if self.config.lite_mode_enabled else self.config.process_refresh_seconds,
+            30.0 if self.config.ultra_lite_mode_enabled else 12.0 if self.config.lite_mode_enabled else self.config.process_refresh_seconds,
             self.config.process_refresh_seconds,
         )
         if hasattr(self, "activity_timer"):
-            self.activity_timer.setInterval(25000 if self.config.lite_mode_enabled else 15000)
+            self.activity_timer.setInterval(
+                45000 if self.config.ultra_lite_mode_enabled else 25000 if self.config.lite_mode_enabled else 15000
+            )
         if self.isVisible() and not self.isMinimized():
             self._enter_foreground_mode()
         self._apply_visual_effects_mode()
+        self._apply_background_load_mode()
         self._sync_sleep_wake_timer()
 
     def _apply_visual_effects_mode(self) -> None:
@@ -3560,6 +3791,38 @@ class PCOptimizerQtWindow(QMainWindow):
                     "settings",
                     "Визуальные эффекты восстановлены",
                     "Системные настройки возвращены к исходным значениям.",
+                    "success",
+                )
+
+    def _apply_background_load_mode(self, *, force: bool = False) -> None:
+        if not self.config.background_load_control_enabled:
+            if self.background_load.active and self.config.background_load_restore_on_exit:
+                if self.background_load.restore():
+                    self.history.add_event(
+                        "settings",
+                        "Фоновая нагрузка Windows восстановлена",
+                        "Системные фоновые настройки возвращены к исходным значениям.",
+                        "success",
+                    )
+            return
+        if not force and not self.config.background_load_auto_on_load and not self.background_load.active:
+            return
+        disabled = set(self.config.background_load_disabled_ids)
+        if disabled:
+            count = self.background_load.apply_disabled_set(disabled)
+            if count:
+                self.history.add_event(
+                    "settings",
+                    f"Фоновая нагрузка Windows: {count} отключено",
+                    "Применены выбранные HKCU-настройки Widgets/Game Bar/DVR.",
+                    "info",
+                )
+        elif self.background_load.active and self.config.background_load_restore_on_exit:
+            if self.background_load.restore():
+                self.history.add_event(
+                    "settings",
+                    "Фоновая нагрузка Windows восстановлена",
+                    "Системные фоновые настройки возвращены к исходным значениям.",
                     "success",
                 )
 
@@ -3598,10 +3861,15 @@ class PCOptimizerQtWindow(QMainWindow):
         )
         if answer == QMessageBox.StandardButton.Yes:
             self.config.lite_mode_enabled = True
+            self.config.ultra_lite_mode_enabled = True
             self.config.visual_effects_low_power_enabled = True
-            self.config.monitor_interval_seconds = max(self.config.monitor_interval_seconds, 3.5)
-            self.config.process_refresh_seconds = max(self.config.process_refresh_seconds, 12.0)
-            self.config.cpu_optimizer_max_processes = min(self.config.cpu_optimizer_max_processes, 2)
+            self.config.background_load_control_enabled = True
+            self.config.background_load_auto_on_load = True
+            self.config.background_load_auto_pause_enabled = True
+            self.config.background_load_disabled_ids = list(SAFE_BACKGROUND_LOAD_PRESET) + list(AUTO_PAUSE_BACKGROUND_LOAD_IDS)
+            self.config.monitor_interval_seconds = max(self.config.monitor_interval_seconds, 10.0)
+            self.config.process_refresh_seconds = max(self.config.process_refresh_seconds, 30.0)
+            self.config.cpu_optimizer_max_processes = min(self.config.cpu_optimizer_max_processes, 1)
             self.config.optimize_step_sleep_enabled = False
             self.config.optimize_step_close_enabled = False
             self.config.optimize_step_cleanup_enabled = False
@@ -3614,22 +3882,28 @@ class PCOptimizerQtWindow(QMainWindow):
             save_config(self.config)
 
     def _enter_background_mode(self) -> None:
-        self.monitor.interval_seconds = max(18.0 if self.config.lite_mode_enabled else 10.0, self.config.monitor_interval_seconds, 12.0)
-        self.monitor.process_refresh_seconds = max(90.0 if self.config.lite_mode_enabled else 60.0, self.monitor.interval_seconds)
+        background_monitor = 45.0 if self.config.ultra_lite_mode_enabled else 18.0 if self.config.lite_mode_enabled else 10.0
+        background_process = 240.0 if self.config.ultra_lite_mode_enabled else 90.0 if self.config.lite_mode_enabled else 60.0
+        self.monitor.interval_seconds = max(background_monitor, self.config.monitor_interval_seconds, 12.0)
+        self.monitor.process_refresh_seconds = max(background_process, self.monitor.interval_seconds)
         self.monitor.set_process_collection_enabled(False)
         self.graph.set_live_updates_enabled(False)
         if hasattr(self, "activity_timer"):
-            self.activity_timer.setInterval(45000 if self.config.lite_mode_enabled else 30000)
+            self.activity_timer.setInterval(
+                60000 if self.config.ultra_lite_mode_enabled else 45000 if self.config.lite_mode_enabled else 30000
+            )
         self._sync_sleep_wake_timer()
 
     def _enter_foreground_mode(self) -> None:
         self.monitor.interval_seconds = self._foreground_monitor_interval
         self.monitor.process_refresh_seconds = self._foreground_process_interval
-        self.graph.set_lite_mode(self.config.lite_mode_enabled)
+        self.graph.set_lite_mode(self.config.lite_mode_enabled or self.config.ultra_lite_mode_enabled)
         self.graph.set_live_updates_enabled(self._graph_updates_allowed())
         self._sync_process_collection_mode()
         if hasattr(self, "activity_timer"):
-            self.activity_timer.setInterval(25000 if self.config.lite_mode_enabled else 15000)
+            self.activity_timer.setInterval(
+                45000 if self.config.ultra_lite_mode_enabled else 25000 if self.config.lite_mode_enabled else 15000
+            )
         self._sync_sleep_wake_timer()
 
     def _sync_process_collection_mode(self) -> None:
@@ -3676,6 +3950,8 @@ class PCOptimizerQtWindow(QMainWindow):
             self.sleep_manager.resume_process(entry.pid, "app exit")
         if self.config.visual_effects_restore_on_exit:
             self.visual_effects.restore()
+        if self.config.background_load_restore_on_exit:
+            self.background_load.restore()
         self.monitor.stop()
         self.tray.hide()
         QApplication.instance().quit()
