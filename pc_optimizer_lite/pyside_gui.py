@@ -50,6 +50,7 @@ except ImportError:  # pragma: no cover - PySide6 builds without OpenGL widgets
     _GraphWidgetBase = QWidget
 
 from .autostart import disable_autostart, enable_autostart, get_launch_command, is_autostart_enabled
+from .gpu_acceleration import AccelerationChecker, AccelerationStatus
 from .background_load import (
     AUTO_PAUSE_BACKGROUND_LOAD_IDS,
     BACKGROUND_LOAD_CONTROLS,
@@ -284,6 +285,19 @@ class RamCleanWorker(QObject):
         finally:
             if backgrounded:
                 _set_current_thread_background_mode(False)
+
+
+class AccelerationCheckWorker(QObject):
+    """Reads hardware-acceleration config files for known apps in the background."""
+
+    result_received = Signal(object)
+
+    def run(self) -> None:
+        try:
+            self.result_received.emit(AccelerationChecker().check_all())
+        except Exception:
+            LOGGER.exception("Hardware acceleration check failed")
+            self.result_received.emit([])
 
 
 class UpdateCheckWorker(QObject):
@@ -761,6 +775,8 @@ class PCOptimizerQtWindow(QMainWindow):
         self._ram_clean_thread: QThread | None = None
         self._ram_clean_worker_obj: RamCleanWorker | None = None
         self._ram_clean_context: dict[str, object] = {}
+        self._acceleration_thread: QThread | None = None
+        self._acceleration_worker_obj: AccelerationCheckWorker | None = None
         self._update_thread: QThread | None = None
         self._update_worker_obj: UpdateCheckWorker | None = None
         self._update_install_thread: QThread | None = None
@@ -1344,6 +1360,32 @@ class PCOptimizerQtWindow(QMainWindow):
         startup_layout.addWidget(startup_hint)
         layout.addWidget(startup_panel)
 
+        self.acceleration_table = QTableWidget(0, 3)
+        self.acceleration_table.setHorizontalHeaderLabels(["Приложение", "Статус", "Подсказка"])
+        _configure_table(self.acceleration_table, min_rows=2)
+        accel_panel = QFrame()
+        accel_panel.setObjectName("InlinePanel")
+        accel_layout = QVBoxLayout(accel_panel)
+        accel_layout.setContentsMargins(14, 12, 14, 14)
+        accel_header = QHBoxLayout()
+        accel_title = QLabel("Аппаратное ускорение приложений")
+        accel_title.setObjectName("SectionTitle")
+        accel_header.addWidget(accel_title)
+        accel_header.addStretch(1)
+        self.acceleration_check_btn = _button("Проверить ускорение", "zap", self.check_hardware_acceleration, self.palette)
+        self.acceleration_check_btn.setEnabled(self.config.gpu_acceleration_check_enabled)
+        accel_header.addWidget(self.acceleration_check_btn)
+        accel_layout.addLayout(accel_header)
+        accel_layout.addWidget(self.acceleration_table)
+        accel_hint = QLabel(
+            "Только чтение настроек CPU/GPU-ускорения у Chrome/Edge/Brave/Discord/Telegram — ничего не меняется автоматически. "
+            "Проверка запускается только по кнопке, не входит в постоянный мониторинг."
+        )
+        accel_hint.setObjectName("SettingsHint")
+        accel_hint.setWordWrap(True)
+        accel_layout.addWidget(accel_hint)
+        layout.addWidget(accel_panel)
+
         self.refresh_activity()
         self.refresh_startup_entries()
 
@@ -1566,6 +1608,12 @@ class PCOptimizerQtWindow(QMainWindow):
         self.cpu_affinity_check.setChecked(self.config.cpu_throttle_affinity_enabled)
         self.cpu_limiter_check = _toggle("Короткий CPU limiter fallback")
         self.cpu_limiter_check.setChecked(self.config.cpu_limiter_enabled)
+        self.gpu_accel_check_toggle = _toggle("Разрешить проверку аппаратного ускорения приложений")
+        self.gpu_accel_check_toggle.setChecked(self.config.gpu_acceleration_check_enabled)
+        self.gpu_accel_check_toggle.setToolTip(
+            "Только чтение настроек Chrome/Edge/Brave/Discord/Telegram по кнопке во вкладке «Активность». "
+            "Ничего не изменяет автоматически и не сканирует в фоне."
+        )
         self.scheduled_cleanup_check = _toggle("Автоочистка temp/cache")
         self.scheduled_cleanup_check.setChecked(self.config.scheduled_cleanup_enabled)
         self.scheduled_cleanup_interval_edit = QLineEdit(str(self.config.scheduled_cleanup_interval_minutes))
@@ -1678,6 +1726,7 @@ class PCOptimizerQtWindow(QMainWindow):
         _form_row(cpu_form, "", self.cpu_throttle_check)
         _form_row(cpu_form, "", self.cpu_affinity_check)
         _form_row(cpu_form, "", self.cpu_limiter_check)
+        _form_row(cpu_form, "", self.gpu_accel_check_toggle)
         _form_row(cpu_form, "Доля ядер при affinity", self.cpu_optimizer_affinity_ratio_edit)
         _form_row(cpu_form, "Минимум ядер оставить", self.cpu_optimizer_min_cores_edit)
         _form_row(cpu_form, "Автовозврат через, сек", self.cpu_optimizer_restore_edit)
@@ -2075,6 +2124,8 @@ class PCOptimizerQtWindow(QMainWindow):
             self.cpu_throttle_check.setChecked(self.config.cpu_throttle_enabled)
             self.cpu_affinity_check.setChecked(self.config.cpu_throttle_affinity_enabled)
             self.cpu_limiter_check.setChecked(self.config.cpu_limiter_enabled)
+            self.gpu_accel_check_toggle.setChecked(self.config.gpu_acceleration_check_enabled)
+            self.acceleration_check_btn.setEnabled(self.config.gpu_acceleration_check_enabled)
             self.scheduled_cleanup_check.setChecked(self.config.scheduled_cleanup_enabled)
             self.scheduled_cleanup_interval_edit.setText(str(self.config.scheduled_cleanup_interval_minutes))
             self.scheduled_cleanup_notify_check.setChecked(self.config.scheduled_cleanup_notify)
@@ -3400,6 +3451,46 @@ class PCOptimizerQtWindow(QMainWindow):
             QMessageBox.warning(self, "Автозагрузка", message)
         self.refresh_startup_entries()
 
+    def check_hardware_acceleration(self) -> None:
+        if not self.config.gpu_acceleration_check_enabled:
+            return
+        if self._acceleration_thread and self._acceleration_thread.isRunning():
+            return
+        self.acceleration_check_btn.setEnabled(False)
+        thread = QThread(self)
+        worker = AccelerationCheckWorker()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.result_received.connect(self._on_acceleration_check_result)
+        worker.result_received.connect(thread.quit)
+        worker.result_received.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._acceleration_thread = thread
+        self._acceleration_worker_obj = worker
+        thread.start()
+
+    def _on_acceleration_check_result(self, statuses: list[AccelerationStatus]) -> None:
+        self.acceleration_check_btn.setEnabled(self.config.gpu_acceleration_check_enabled)
+        if not statuses:
+            self.acceleration_table.setRowCount(1)
+            self.acceleration_table.setItem(0, 0, QTableWidgetItem("—"))
+            self.acceleration_table.setItem(0, 1, QTableWidgetItem("Поддерживаемые приложения не найдены"))
+            self.acceleration_table.setItem(0, 2, QTableWidgetItem(""))
+            return
+        self.acceleration_table.setRowCount(len(statuses))
+        for row, status in enumerate(statuses):
+            if status.hardware_accel is True:
+                status_text, color = "✅ Включено", self.palette["good"]
+            elif status.hardware_accel is False:
+                status_text, color = "⚠️ Выключено", self.palette["warn"]
+            else:
+                status_text, color = "❔ Не определено", self.palette["muted"]
+            status_item = QTableWidgetItem(status_text)
+            status_item.setForeground(QColor(color))
+            self.acceleration_table.setItem(row, 0, QTableWidgetItem(status.app_name))
+            self.acceleration_table.setItem(row, 1, status_item)
+            self.acceleration_table.setItem(row, 2, QTableWidgetItem(status.hint or ""))
+
     def wake_process(self, pid: int) -> None:
         action = self.sleep_manager.resume_process(pid, "manual")
         QMessageBox.information(self, "Сон", action.message)
@@ -3563,6 +3654,8 @@ class PCOptimizerQtWindow(QMainWindow):
             self.config.cpu_throttle_enabled = self.cpu_throttle_check.isChecked()
             self.config.cpu_throttle_affinity_enabled = self.cpu_affinity_check.isChecked()
             self.config.cpu_limiter_enabled = self.cpu_limiter_check.isChecked()
+            self.config.gpu_acceleration_check_enabled = self.gpu_accel_check_toggle.isChecked()
+            self.acceleration_check_btn.setEnabled(self.config.gpu_acceleration_check_enabled)
             self.config.scheduled_cleanup_enabled = self.scheduled_cleanup_check.isChecked()
             self.config.scheduled_cleanup_interval_minutes = float(self.scheduled_cleanup_interval_edit.text())
             self.config.scheduled_cleanup_notify = self.scheduled_cleanup_notify_check.isChecked()

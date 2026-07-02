@@ -20,7 +20,7 @@ DEFAULT_LOG_FILENAME = "pc_optimizer_lite.log"
 DEFAULT_GITHUB_OWNER = "kot04ka"
 DEFAULT_GITHUB_REPO = "pc-optimizer-lite"
 DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 4.0
-CONFIG_SCHEMA_VERSION = 10
+CONFIG_SCHEMA_VERSION = 11
 BACKGROUND_LOAD_CONTROL_IDS = {control.id for control in BACKGROUND_LOAD_CONTROLS}
 
 
@@ -128,6 +128,7 @@ class AppConfig:
     skipped_update_version: str = ""
     github_owner: str = DEFAULT_GITHUB_OWNER
     github_repo: str = DEFAULT_GITHUB_REPO
+    gpu_acceleration_check_enabled: bool = True
 
 
 def get_app_data_dir() -> Path:
@@ -293,6 +294,7 @@ def sanitize_config(config: AppConfig) -> AppConfig:
     ):
         setattr(config, key, bool(getattr(config, key)))
     config.update_check_interval_hours = DEFAULT_UPDATE_CHECK_INTERVAL_HOURS
+    config.gpu_acceleration_check_enabled = bool(config.gpu_acceleration_check_enabled)
     config.skipped_update_version = str(config.skipped_update_version).strip()
     config.github_owner = str(config.github_owner).strip() or DEFAULT_GITHUB_OWNER
     config.github_repo = str(config.github_repo).strip() or DEFAULT_GITHUB_REPO
@@ -550,6 +552,9 @@ def _migrate_config_data(data: dict[str, Any]) -> dict[str, Any]:
         migrated.setdefault("background_load_pause_cooldown_seconds", 180.0)
         migrated.setdefault("ultra_lite_mode_enabled", False)
         migrated["config_version"] = 10
+    if version < 11:
+        migrated.setdefault("gpu_acceleration_check_enabled", True)
+        migrated["config_version"] = 11
     return migrated
 
 
