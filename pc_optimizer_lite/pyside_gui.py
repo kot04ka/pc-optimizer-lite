@@ -44,7 +44,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .autostart import disable_autostart, enable_autostart, is_autostart_enabled
+try:
+    from PySide6.QtOpenGLWidgets import QOpenGLWidget as _GraphWidgetBase
+except ImportError:  # pragma: no cover - PySide6 builds without OpenGL widgets
+    _GraphWidgetBase = QWidget
+
+from .autostart import disable_autostart, enable_autostart, get_launch_command, is_autostart_enabled
 from .background_load import (
     AUTO_PAUSE_BACKGROUND_LOAD_IDS,
     BACKGROUND_LOAD_CONTROLS,
@@ -80,6 +85,7 @@ from .ram_cleaner import MEMORY_PURGE_STANDBY_LIST, RamCleanMode, RamCleaner, Ra
 from .runtime_policy import sleep_wake_poll_policy
 from .sleep_manager import SleepAction, SleepManager
 from .smart_process_manager import CloseCandidate, SmartProcessManager
+from .startup_manager import StartupEntry, StartupManager
 from .ui_model import DEFAULT_NAV_PAGES, SETTINGS_LAYOUT, TOPBAR_ACTIONS_LABEL, build_design_palette, evaluate_system_health
 from .updater import UpdateCheckResult, UpdateError, check_for_updates, download_and_install_update, is_repository_configured
 from .version import APP_VERSION
@@ -331,8 +337,13 @@ class UpdateInstallWorker(QObject):
             self.error_received.emit(str(exc))
 
 
-class HistoryGraphWidget(QWidget):
-    """Tiny custom real-time CPU/RAM graph with no plotting dependency."""
+class HistoryGraphWidget(_GraphWidgetBase):
+    """Tiny custom real-time CPU/RAM graph with no plotting dependency.
+
+    Paints with QPainter inside paintEvent() as usual; basing this on
+    QOpenGLWidget (when available) hands the actual compositing to the GPU
+    instead of the CPU, with no other code changes needed.
+    """
 
     def __init__(self, palette: dict[str, str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -716,6 +727,7 @@ class PCOptimizerQtWindow(QMainWindow):
         self.cpu_throttler = cpu_throttler
         self.visual_effects = VisualEffectsManager()
         self.background_load = BackgroundLoadManager()
+        self.startup_manager = StartupManager()
         self.palette = THEMES[self.config.theme]
         self.bridge = SnapshotBridge()
         self.bridge.snapshot_received.connect(self._render_snapshot)
@@ -1307,7 +1319,33 @@ class PCOptimizerQtWindow(QMainWindow):
         closed_layout.addWidget(closed_title)
         closed_layout.addWidget(self.closed_table)
         layout.addWidget(closed_panel)
+
+        self.startup_table = QTableWidget(0, 4)
+        self.startup_table.setHorizontalHeaderLabels(["Программа", "Источник", "Статус", "Действие"])
+        _configure_table(self.startup_table, min_rows=3)
+        startup_panel = QFrame()
+        startup_panel.setObjectName("InlinePanel")
+        startup_layout = QVBoxLayout(startup_panel)
+        startup_layout.setContentsMargins(14, 12, 14, 14)
+        startup_header = QHBoxLayout()
+        startup_title = QLabel("Автозагрузка Windows")
+        startup_title.setObjectName("SectionTitle")
+        startup_header.addWidget(startup_title)
+        startup_header.addStretch(1)
+        startup_header.addWidget(_button("Обновить", "refresh", self.refresh_startup_entries, self.palette))
+        startup_layout.addLayout(startup_header)
+        startup_layout.addWidget(self.startup_table)
+        startup_hint = QLabel(
+            "Отключение обратимо: программа не удаляется, а временно убирается из автозагрузки и может быть возвращена. "
+            "Записи для всех пользователей (реестр HKLM / общая папка) требуют прав администратора."
+        )
+        startup_hint.setObjectName("SettingsHint")
+        startup_hint.setWordWrap(True)
+        startup_layout.addWidget(startup_hint)
+        layout.addWidget(startup_panel)
+
         self.refresh_activity()
+        self.refresh_startup_entries()
 
     def _build_whitelist_tab(self) -> None:
         layout = QVBoxLayout(self.whitelist_tab)
@@ -3320,6 +3358,47 @@ class PCOptimizerQtWindow(QMainWindow):
             button = _button(button_text, "rotate", lambda entry_id=entry.id: self.restore_closed_process(entry_id), self.palette)
             button.setEnabled(bool(entry.exe) and not bool(entry.restored_at))
             self.closed_table.setCellWidget(row, 5, button)
+
+    def refresh_startup_entries(self) -> None:
+        if not self.startup_manager.available:
+            self.startup_table.setRowCount(0)
+            return
+        exclude = {get_launch_command().strip().lower()}
+        entries = self.startup_manager.list_entries(exclude_commands=exclude)
+        admin = is_admin()
+        self.startup_table.setRowCount(len(entries))
+        for row, entry in enumerate(entries):
+            values = (entry.name, entry.source_label, "Включено" if entry.enabled else "Отключено")
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if not entry.enabled:
+                    item.setForeground(QColor(self.palette["muted"]))
+                self.startup_table.setItem(row, column, item)
+            button_text = "Отключить" if entry.enabled else "Включить"
+            icon_name = "x" if entry.enabled else "play"
+            button = _button(button_text, icon_name, lambda e=entry: self.toggle_startup_entry(e), self.palette)
+            if entry.requires_admin and not admin:
+                button.setEnabled(False)
+                button.setToolTip("Требуются права администратора")
+            self.startup_table.setCellWidget(row, 3, button)
+
+    def toggle_startup_entry(self, entry: StartupEntry) -> None:
+        if entry.enabled:
+            ok, message = self.startup_manager.disable(entry)
+            action_label = "отключена"
+        else:
+            ok, message = self.startup_manager.enable(entry)
+            action_label = "включена"
+        if ok:
+            self.history.add_event(
+                "settings",
+                f"Автозагрузка: {entry.name} {action_label}",
+                entry.source_label,
+                "info",
+            )
+        else:
+            QMessageBox.warning(self, "Автозагрузка", message)
+        self.refresh_startup_entries()
 
     def wake_process(self, pid: int) -> None:
         action = self.sleep_manager.resume_process(pid, "manual")
